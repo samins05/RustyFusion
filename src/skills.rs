@@ -429,6 +429,18 @@ impl BuffContainer {
     }
 }
 
+/// A projectile (rocket) in flight. Created on FIRE, consumed on HIT.
+/// Attack stats are snapshotted at fire time so the hit uses what the
+/// player had when they shot, not when the rocket lands.
+#[derive(Debug, Clone, Copy)]
+pub struct Bullet {
+    pub single_power: i32,
+    pub multi_power: i32,
+    pub style: Option<CombatStyle>,
+    pub charged: bool,
+    pub weapon_id: i16,
+}
+
 struct BasicAttack {
     power: i32,
     crit_chance: Option<f32>,
@@ -620,6 +632,62 @@ pub fn do_basic_attack(
     });
 
     Ok(())
+}
+
+/// Resolves a projectile (rocket) hit using attack stats snapshotted at fire time.
+/// Unlike `do_basic_attack`, this sends no packets; the caller builds the
+/// projectile-specific response from the returned results.
+pub fn do_projectile_attack(
+    attacker_id: EntityID,
+    target_ids: &[EntityID],
+    bullet: &Bullet,
+    state: &mut ShardServerState,
+) -> FFResult<Vec<sAttackResult>> {
+    const CRIT_CHANCE: f32 = 0.05;
+
+    if let EntityID::Player(pc_id) = attacker_id {
+        let player = state.get_player_mut(pc_id)?;
+        if let Some(eid) = target_ids.first() {
+            // used by scripts as an indicator of who the player is in combat with
+            player.target = Some(*eid);
+        }
+    }
+
+    let power = if target_ids.len() == 1 {
+        bullet.single_power
+    } else {
+        bullet.multi_power
+    };
+    let attack = BasicAttack {
+        power,
+        crit_chance: Some(CRIT_CHANCE),
+        attack_style: bullet.style,
+        charged: bullet.charged,
+    };
+
+    let mut results = Vec::with_capacity(target_ids.len());
+    for target_id in target_ids {
+        let target = match state.get_combatant_mut(*target_id) {
+            Ok(target) => target,
+            Err(e) => {
+                log_error(e);
+                continue;
+            }
+        };
+        if target.is_dead() {
+            log(
+                Severity::Warning,
+                &format!(
+                    "{:?} tried to hit dead target {:?} with a projectile",
+                    attacker_id, target_id
+                ),
+            );
+            continue;
+        }
+        results.push(handle_basic_attack(attacker_id, target, &attack));
+    }
+
+    Ok(results)
 }
 
 pub fn do_skill(

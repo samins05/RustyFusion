@@ -27,7 +27,7 @@ use crate::{
         FFClient, FFProtocol,
     },
     path::Path,
-    skills::{BuffContainer, BuffInstance},
+    skills::{BuffContainer, BuffInstance, Bullet},
     state::ShardServerState,
     tabledata::{tdata_get, TripData},
     util::{self, clamp, clamp_max, clamp_min, Bitfield},
@@ -454,6 +454,7 @@ pub struct Player {
     fusion_matter: u32,
     nano_potions: u32,
     weapon_boosts: u32,
+    bullets: [Option<Bullet>; SIZEOF_PC_BULLET_SLOT as usize],
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1391,6 +1392,23 @@ impl Player {
 
     pub fn get_weapon_boosts(&self) -> u32 {
         self.weapon_boosts
+    }
+
+    pub fn add_bullet(&mut self, bullet: Bullet) -> FFResult<i8> {
+        let Some(slot) = self.bullets.iter().position(|b| b.is_none()) else {
+            return Err(FFError::build(
+                Severity::Warning,
+                format!("{} has no free bullet slots", self),
+            ));
+        };
+        self.bullets[slot] = Some(bullet);
+        Ok(slot as i8)
+    }
+
+    /// Removes and returns the bullet in the given slot, if any.
+    pub fn remove_bullet(&mut self, bullet_id: i8) -> Option<Bullet> {
+        let slot = usize::try_from(bullet_id).ok()?;
+        self.bullets.get_mut(slot)?.take()
     }
 
     pub fn get_nano_potions(&self) -> u32 {
