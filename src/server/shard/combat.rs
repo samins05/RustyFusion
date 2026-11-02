@@ -31,6 +31,17 @@ struct sTargetPcId {
 }
 impl FFPacket for sTargetPcId {}
 
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[repr(packed(4))]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct sProjectileTarget {
+    pub iID: i32,
+    pub eCT: i32,
+}
+impl FFPacket for sProjectileTarget {}
+
 const MAX_TARGETS: usize = 3;
 const BATTERY_BASE_COST: u32 = 6;
 
@@ -286,7 +297,7 @@ pub fn pc_rocket_hit(
 
     let mut target_ids = Vec::new();
     for _ in 0..target_count.max(0) {
-        let npc_id = reader.get_struct::<sTargetNpcId>()?.iNPC_ID;
+        let npc_id = reader.get_struct::<sProjectileTarget>()?.iID;
         match state.get_npc(npc_id) {
             Ok(npc) => target_ids.push(npc.get_id()),
             Err(e) => log_error(e),
