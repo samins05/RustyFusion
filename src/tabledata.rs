@@ -200,6 +200,8 @@ pub struct NPCStats {
     pub power: i32,
     pub defense: i32,
     pub radius: u32,
+    pub height: u32,
+    pub scale: f32,
     pub walk_speed: i32,
     pub run_speed: i32,
     pub sight_range: u32,
@@ -901,6 +903,23 @@ impl TableData {
             ))
     }
 
+    /// Distinct hostile NPC types that are spawned somewhere in the world (followers included), sorted by type.
+    pub fn get_spawned_mob_types(&self) -> Vec<i32> {
+        let mut types: Vec<i32> = self
+            .npcs
+            .iter()
+            .flat_map(|d| {
+                std::iter::once(d.npc_type).chain(d.followers.iter().map(|f| f.npc_type))
+            })
+            .filter(|t| {
+                matches!(self.get_npc_stats(*t), Ok(s) if matches!(s.team, crate::enums::CombatantTeam::Mob))
+            })
+            .collect();
+        types.sort_unstable();
+        types.dedup();
+        types
+    }
+
     pub fn get_mission_reward(&self, reward_id: i32) -> FFResult<Reward> {
         self.xdt_data
             .mission_data
@@ -1180,6 +1199,7 @@ fn load_item_data(
                 multi_power: data.m_iGroupRat,
                 defense: data.m_iDefenseRat,
                 speed: data.m_iUp_runSpeed,
+                effect_area: data.m_iEffectArea,
             };
             map.insert(key, data);
         }
@@ -2028,6 +2048,8 @@ fn load_npc_data(root: &Map<String, Value>) -> Result<HashMap<i32, NPCData>, Str
         m_iProtection: i32,
         m_iNpcStyle: i32,
         m_iRadius: u32,
+        m_iHeight: u32,
+        m_fScale: f32,
         m_iWalkSpeed: i32,
         m_iRunSpeed: i32,
         m_iSightRange: u32,
@@ -2063,6 +2085,8 @@ fn load_npc_data(root: &Map<String, Value>) -> Result<HashMap<i32, NPCData>, Str
             power: entry.m_iPower,
             defense: entry.m_iProtection,
             radius: entry.m_iRadius,
+            height: entry.m_iHeight,
+            scale: entry.m_fScale,
             walk_speed: entry.m_iWalkSpeed,
             run_speed: entry.m_iRunSpeed,
             sight_range: entry.m_iSightRange,

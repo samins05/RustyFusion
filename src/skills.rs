@@ -14,6 +14,7 @@ use crate::{
     error::*,
     net::packet::{PacketID::*, *},
     state::ShardServerState,
+    Position,
 };
 
 pub enum SkillResult {
@@ -439,6 +440,11 @@ pub struct Bullet {
     pub style: Option<CombatStyle>,
     pub charged: bool,
     pub weapon_id: i16,
+    /// Client-reported launch point (FIRE iX/iY/iZ).
+    pub fired_from: Position,
+    /// Client-reported aim point (FIRE iToX/iToY/iToZ).
+    pub aimed_at: Position,
+    pub fired_at: Instant,
 }
 
 struct BasicAttack {

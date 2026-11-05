@@ -153,3 +153,13 @@ num_sliders = 20 # how many sliders (evenly spaced out) there should be on the s
 #: u64
 vehicle_duration = 10_080  # how long (minutes) after a vehicle is bought before it expires
                            # defaults to one week
+
+#: u32
+rocket_blast_slack = 25 # rocket hit range check (warn-only for now), same rule as the client:
+                        # each claimed target's body center (feet + m_iHeight / 2) must be within
+                        # max(m_iRadius, m_iHeight / 2) + weapon m_iEffectArea of the hit point (3D).
+                        # this extra allowance (game units) covers mobs moving between client and server.
+
+#: String
+rocketlab_csv_path = "rocketlab.csv" # [testbed] append one row per nearby NPC per rocket hit
+                                     # (for fitting the blast range rule). blank to disable.
