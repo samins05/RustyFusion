@@ -200,6 +200,7 @@ pub struct NPCStats {
     pub power: i32,
     pub defense: i32,
     pub radius: u32,
+    pub height: u32,
     pub walk_speed: i32,
     pub run_speed: i32,
     pub sight_range: u32,
@@ -1180,6 +1181,7 @@ fn load_item_data(
                 multi_power: data.m_iGroupRat,
                 defense: data.m_iDefenseRat,
                 speed: data.m_iUp_runSpeed,
+                effect_area: data.m_iEffectArea,
             };
             map.insert(key, data);
         }
@@ -2028,6 +2030,7 @@ fn load_npc_data(root: &Map<String, Value>) -> Result<HashMap<i32, NPCData>, Str
         m_iProtection: i32,
         m_iNpcStyle: i32,
         m_iRadius: u32,
+        m_iHeight: u32,
         m_iWalkSpeed: i32,
         m_iRunSpeed: i32,
         m_iSightRange: u32,
@@ -2063,6 +2066,7 @@ fn load_npc_data(root: &Map<String, Value>) -> Result<HashMap<i32, NPCData>, Str
             power: entry.m_iPower,
             defense: entry.m_iProtection,
             radius: entry.m_iRadius,
+            height: entry.m_iHeight,
             walk_speed: entry.m_iWalkSpeed,
             run_speed: entry.m_iRunSpeed,
             sight_range: entry.m_iSightRange,

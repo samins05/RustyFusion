@@ -1,13 +1,20 @@
+use std::time::SystemTime;
+
 use crate::{
-    entity::{Combatant, Entity, EntityID},
-    enums::{SkillTargetType, TargetType},
+    config::config_get,
+    entity::{Combatant, Entity, EntityID, Bullet, BulletType, Player, NPC},
+    enums::{ItemLocation, SkillTargetType, TargetType},
     error::*,
+    defines::EQUIP_SLOT_HAND,
     net::{
         packet::{PacketID::*, *},
         ClientMap,
     },
+    item::{Item},
     skills::{self, SkillResult},
     state::ShardServerState,
+    tabledata::tdata_get,
+    Position,
 };
 
 #[allow(non_camel_case_types)]
@@ -29,6 +36,17 @@ struct sTargetPcId {
     pub iPC_ID: i32,
 }
 impl FFPacket for sTargetPcId {}
+
+#[allow(non_camel_case_types)]
+#[allow(non_snake_case)]
+#[repr(packed(4))]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+struct sBulletTarget {
+    pub target_id: i32,
+    pub character_type: i32,
+}
+impl FFPacket for sBulletTarget {}
 
 const MAX_TARGETS: usize = 3;
 const BATTERY_BASE_COST: u32 = 6;
@@ -159,6 +177,197 @@ pub fn pc_attack_pcs(
 
     Ok(())
 }
+
+pub fn pc_rocket_style_fire(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let client = clients.get_sender();
+    let pc_id = client.get_player_id()?;
+    let player = state.get_player_mut(pc_id)?;
+    let pkt: &sP_CL2FE_REQ_PC_ROCKET_STYLE_FIRE = pkt.get()?;
+
+    let Some(weapon): Option<Item> = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} tried to fire a rocket with no item equipped", player),
+        ));
+    };
+    
+    let weapon_stats = weapon.get_stats()?;
+    
+    let weapon_boosts = player.get_weapon_boosts();
+    let weapon_boosts_needed = BATTERY_BASE_COST + weapon_stats.required_level as u32;
+
+    let weapon_charged = if weapon_boosts >= weapon_boosts_needed {
+        player.set_weapon_boosts(weapon_boosts - weapon_boosts_needed);
+        true
+    } else {
+        player.set_weapon_boosts(0);
+        false
+    };
+
+    let bullet = Bullet {
+        bullet_type: BulletType::Rocket(weapon.id),
+        single_power: player.get_single_power(),
+        multi_power: player.get_multi_power(),
+        charged: weapon_charged,
+        effect_area: weapon_stats.effect_area.unwrap_or(0) as u32,
+        start_pos: Position { x: pkt.iX, y: pkt.iY, z: pkt.iZ},
+        end_pos: Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ},
+        end_time: SystemTime::now(),
+    };
+
+    let action_message = "shoot rocket";
+
+    let Some(bullet_id): Option<i8> = player.add_bullet(bullet.clone()) else {
+        log(
+            Severity::Debug,
+            &format!("{} tried to {} but has too many bullets", player, action_message),
+        );
+        return Ok(());
+    };
+    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
+
+    let (nano_id, nano_stamina) = player
+        .get_active_nano()
+        .map(|nano| (nano.get_id(), nano.get_stamina()))
+        .unwrap_or((0, 0));
+
+    // reply to the shooter
+    let resp = sP_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC {
+        iSkillID: pkt.iSkillID,
+        iX: pkt.iX,
+        iY: pkt.iY,
+        iZ: pkt.iZ,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: bullet_id,
+        Bullet: spc_bullet,
+        iBatteryW: player.get_weapon_boosts() as i32,
+        bNanoDeactive: 0,
+        iNanoID: nano_id,
+        iNanoStamina: nano_stamina,
+    };
+    client.send_packet(P_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC, &resp);
+
+    // tell nearby players
+    let bcast = sP_FE2CL_PC_ROCKET_STYLE_FIRE {
+        iPC_ID: pc_id,
+        iX: pkt.iX,
+        iY: pkt.iY,
+        iZ: pkt.iZ,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: bullet_id,
+        Bullet: spc_bullet,
+        bNanoDeactive: 0,
+    };
+    state
+        .entity_map
+        .for_each_around(EntityID::Player(pc_id), |c| {
+            c.send_packet(P_FE2CL_PC_ROCKET_STYLE_FIRE, &bcast);
+        });
+
+    Ok(())
+}
+
+/// Warns if a claimed target is outside the blast, using the client's own rule:
+/// the 3D distance from the hit point to the mob's mid-height must be less than
+/// max(radius, height / 2) + blast radius. Table values are used as is, without
+/// `m_fScale`. Slack covers mobs moving between the client's and server's view.
+fn warn_if_outside_blast(player: &Player, npc: &NPC, hit_pos: Position, effect_area: u32) {
+    let Ok(stats) = tdata_get().get_npc_stats(npc.ty) else {
+        return;
+    };
+
+    let half_height = stats.height / 2;
+    let npc_pos = npc.get_position();
+    let body_center = Position {
+        z: npc_pos.z + half_height as i32,
+        ..npc_pos
+    };
+
+    let slack = config_get().shard.rocket_blast_slack.get();
+    let limit = stats.radius.max(half_height) + effect_area + slack;
+    let distance = hit_pos.distance_to(&body_center);
+    if distance >= limit {
+        log(
+            Severity::Warning,
+            &format!(
+                "{} rocket hit claimed {} out of range: distance {} >= limit {} (hit {:?}, body center {:?})",
+                player, npc, distance, limit, hit_pos, body_center
+            ),
+        );
+    }
+}
+
+pub fn pc_rocket_style_hit(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let pc_id = clients.get_sender().get_player_id()?;
+    let player = state.get_player_mut(pc_id)?;
+
+    let mut reader = PacketReader::new(&pkt);
+    let header: &sP_CL2FE_REQ_PC_ROCKET_STYLE_HIT = reader.get_struct()?;
+    let bullet_id = header.iBulletID;
+
+    let Some(bullet): Option<Bullet> = player.remove_bullet(bullet_id) else {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} reported a hit for unknown bullet {}", player, bullet_id),
+        ));
+    };
+    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
+
+    let hit_pos = Position {
+        x: header.iX,
+        y: header.iY,
+        z: header.iZ,
+    };
+    let player = state.get_player(pc_id)?;
+
+    let mut target_ids = Vec::new();
+    for _ in 0..header.iTargetCnt {
+        let npc_id = reader.get_struct::<sBulletTarget>()?.target_id;
+        match state.get_npc(npc_id) {
+            Ok(npc) => {
+                warn_if_outside_blast(player, npc, hit_pos, bullet.effect_area);
+                target_ids.push(npc.get_id());
+            }
+            Err(e) => log_error(e),
+        }
+    }
+
+    let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &bullet, state)?;
+
+    let mut bcast =
+        PacketBuilder::new(P_FE2CL_PC_ROCKET_STYLE_HIT).with(&sP_FE2CL_PC_ROCKET_STYLE_HIT {
+            iPC_ID: pc_id,
+            iBulletID: bullet_id,
+            Bullet: spc_bullet,
+            iTargetCnt: results.len() as i32,
+        });
+    for result in &results {
+        bcast.push(result);
+    }
+
+    if let Some(bcast) = log_if_failed(bcast.build()) {
+        state
+            .entity_map
+            .for_each_around(EntityID::Player(pc_id), |c| {
+                c.send_payload(bcast.clone());
+            });
+    }
+
+    Ok(())
+}
+
 
 pub fn nano_skill_use(
     pkt: Packet,

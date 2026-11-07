@@ -7,7 +7,7 @@ use rand::Rng;
 
 use crate::{
     defines::*,
-    entity::{Combatant, EntityID},
+    entity::{Combatant, EntityID, Bullet},
     enums::{
         BuffID, BuffType, CombatStyle, SkillTargetType, SkillType, TargetType, TimeBuffUpdate,
     },
@@ -620,6 +620,58 @@ pub fn do_basic_attack(
     });
 
     Ok(())
+}
+
+pub fn do_projectile_attack(
+    attacker_id: EntityID,
+    target_ids: &[EntityID],
+    bullet: &Bullet,
+    state: &mut ShardServerState,
+) -> FFResult<Vec<sAttackResult>> {
+    const CRIT_CHANCE: f32 = 0.05;
+
+    if let EntityID::Player(pc_id) = attacker_id {
+        let player = state.get_player_mut(pc_id)?;
+        if let Some(eid) = target_ids.first() {
+            // used by scripts as an indicator of who the player is in combat with
+            player.target = Some(*eid);
+        }
+    }
+
+    let attack = BasicAttack {
+        power: if target_ids.len() == 1 {
+            bullet.single_power
+        } else {
+            bullet.multi_power
+        },
+        crit_chance: Some(CRIT_CHANCE),
+        attack_style: state.get_combatant(attacker_id)?.get_style(),
+        charged: bullet.charged,
+    };
+
+    let mut attack_results = Vec::with_capacity(target_ids.len());
+    for target_id in target_ids {
+        let target = match state.get_combatant_mut(*target_id) {
+            Ok(target) => target,
+            Err(e) => {
+                log_error(e);
+                continue;
+            }
+        };
+        if target.is_dead() {
+            log(
+                Severity::Warning,
+                &format!(
+                    "{:?} tried to attack dead target {:?}",
+                    attacker_id, target_id
+                ),
+            );
+            continue;
+        }
+        attack_results.push(handle_basic_attack(attacker_id, target, &attack));
+    }
+
+    Ok(attack_results)
 }
 
 pub fn do_skill(

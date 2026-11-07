@@ -420,6 +420,37 @@ impl BuddyList {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BulletType {
+    Grenade,
+    Rocket(i16),
+}
+
+#[derive(Debug, Clone)]
+pub struct Bullet {
+    pub bullet_type: BulletType,
+    pub single_power: i32,
+    pub multi_power: i32,
+    pub charged: bool,
+    pub effect_area: u32,
+    pub start_pos: Position,
+    pub end_pos: Position,
+    pub end_time: SystemTime,
+}
+
+impl From<&Bullet> for sPCBullet{
+    fn from(value: &Bullet) -> Self {
+        Self {
+            eAT: 0,
+            iID: match value.bullet_type {
+                BulletType::Grenade => 1,
+                BulletType::Rocket(item_id) => item_id as i32,
+            },
+            bCharged: value.charged as i32,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Player {
     id: Option<i32>,
@@ -454,6 +485,8 @@ pub struct Player {
     fusion_matter: u32,
     nano_potions: u32,
     weapon_boosts: u32,
+    owned_bullets: HashMap<i8, Bullet>,
+    latest_bullet_id: i8,
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1400,6 +1433,24 @@ impl Player {
     pub fn set_weapon_boosts(&mut self, weapon_boosts: u32) -> u32 {
         self.weapon_boosts = clamp(weapon_boosts, 0, PC_BATTERY_MAX);
         self.weapon_boosts
+    }
+
+    pub fn add_bullet(&mut self, bullet: Bullet) -> Option<i8> {
+        if self.owned_bullets.len() == SIZEOF_PC_BULLET_SLOT as usize {
+            return None;
+        }
+        let bullet_id = self.latest_bullet_id;
+        self.latest_bullet_id += 1;
+        if self.latest_bullet_id == SIZEOF_PC_BULLET_SLOT as i8 {
+            self.latest_bullet_id = 0;
+        }
+
+        self.owned_bullets.insert(bullet_id, bullet);
+        Some(bullet_id)
+    }
+
+    pub fn remove_bullet(&mut self, bullet_id: i8) -> Option<Bullet> {
+        self.owned_bullets.remove(&bullet_id)
     }
 
     pub fn set_nano_potions(&mut self, nano_potions: u32) -> u32 {
