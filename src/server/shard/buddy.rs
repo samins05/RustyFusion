@@ -500,3 +500,66 @@ pub fn pc_buddy_warp(
             .send_packet(P_FE2CL_REP_PC_BUDDY_WARP_FAIL, &response);
     })
 }
+
+pub fn remove_buddy(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let client = clients.get_sender();
+    let pkt: &sP_CL2FE_REQ_REMOVE_BUDDY = pkt.get()?;
+
+    let pc_id = client.get_player_id()?;
+    let player = state.get_player(pc_id)?;
+    let player_uid = player.get_player_uid();
+
+    /* not needed i believe
+    let player_is_on_skyway = player.get_skyway_ride().is_some();
+    let player_payzone_flag = player.get_payzone_flag();
+    let player_is_warp_on_cooldown = player.is_warp_on_cooldown();
+    */
+
+    /*
+    let invalid_delete = |msg: String, error_code: i32| -> FFResult<()> {
+        let response = sP_FE2CL_REP_PC_BUDDY_WARP_FAIL {
+            iBuddyPCUID: buddy_uid,
+            iErrorCode: error_code,
+        };
+
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_PC_BUDDY_WARP_FAIL, &response);
+
+        Err(FFError::build(Severity::Info, msg))
+    };
+    */
+
+    // TODO check if they're buddies already
+    let buddy_uid = pkt.iBuddyPCUID;
+    let search = PlayerSearchQuery::ByUID(buddy_uid);
+    let res = search.execute(state);
+    if res.is_none() {
+        // TODO cross-shard
+        // throw a error here 
+        return Ok(());
+    }
+    let buddy_id = res.unwrap();
+
+    let player = state.get_player_mut(pc_id).unwrap();
+    let buddy = state.get_player_mut(buddy_id).unwrap();
+
+    // remove on both 
+    player.remove_buddy(buddy_uid);
+
+
+    // check if buddy online 
+    // Y: update in memory N: update using db 
+    buddy.remove_buddy(pc_id);
+  
+
+    // global remove
+
+    // check if buddy online -> then update their state map
+
+    //
+}
