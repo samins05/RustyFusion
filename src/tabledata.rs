@@ -1182,6 +1182,7 @@ fn load_item_data(
                 defense: data.m_iDefenseRat,
                 speed: data.m_iUp_runSpeed,
                 effect_area: data.m_iEffectArea,
+                equip_type: data.m_iEquipType,
             };
             map.insert(key, data);
         }

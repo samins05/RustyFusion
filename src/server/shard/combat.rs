@@ -5,7 +5,7 @@ use crate::{
     entity::{Combatant, Entity, EntityID, Bullet, BulletType, Player, NPC},
     enums::{ItemLocation, SkillTargetType, TargetType},
     error::*,
-    defines::EQUIP_SLOT_HAND,
+    defines::{EQUIP_SLOT_HAND, WPN_EQUIP_TYPE_DH_ROCKET},
     net::{
         packet::{PacketID::*, *},
         ClientMap,
@@ -196,7 +196,13 @@ pub fn pc_rocket_style_fire(
     };
     
     let weapon_stats = weapon.get_stats()?;
-    
+    if weapon_stats.equip_type != Some(WPN_EQUIP_TYPE_DH_ROCKET as i32) {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} tried to fire a rocket with a non-launcher weapon {}", player, weapon.id),
+        ));
+    }
+
     let weapon_boosts = player.get_weapon_boosts();
     let weapon_boosts_needed = BATTERY_BASE_COST + weapon_stats.required_level as u32;
 
@@ -275,10 +281,7 @@ pub fn pc_rocket_style_fire(
     Ok(())
 }
 
-/// Warns if a claimed target is outside the blast, using the client's own rule:
-/// the 3D distance from the hit point to the mob's mid-height must be less than
-/// max(radius, height / 2) + blast radius. Table values are used as is, without
-/// `m_fScale`. Slack covers mobs moving between the client's and server's view.
+/// Warns if a claimed target is outside our valid blast radius 
 fn warn_if_outside_blast(player: &Player, npc: &NPC, hit_pos: Position, effect_area: u32) {
     let Ok(stats) = tdata_get().get_npc_stats(npc.ty) else {
         return;

@@ -268,6 +268,7 @@ pub struct ItemStats {
     pub defense: Option<i32>,
     pub speed: Option<i32>,
     pub effect_area: Option<i32>,
+    pub equip_type: Option<i32>,
 }
 
 pub struct VendorItem {
