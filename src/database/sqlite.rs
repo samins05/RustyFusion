@@ -933,6 +933,14 @@ impl DbImpl for SqliteDatabase {
         assert_eq!(updated, 1);
         Ok(())
     }
+
+    async fn delete_buddy(&self, pc_uid: BigInt, buddy_uid: BigInt) -> FFResult<()> {
+        let conn = self.pool.get().await?;
+        // 0 rows is fine: the buddyship may already be gone
+        conn.interact(move |conn| Self::exec(conn, "delete_buddy", &[&pc_uid, &buddy_uid]))
+            .await??;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -408,8 +408,45 @@ impl BuddyList {
         Ok(idx)
     }
 
+    fn unblock_buddy(&mut self, pc_uid: i64) -> FFResult<usize> {
+        let idx = self.get_buddy_slot_number(pc_uid).ok_or(FFError::build(
+            Severity::Warning,
+            format!("Player {} is not on the buddy list", pc_uid),
+        ))?;
+        self.slots[idx].as_mut().unwrap().blocked = false;
+        Ok(idx)
+    }
+
     fn get_num_buddies(&self) -> usize {
         self.slots.iter().filter(|entry| entry.is_some()).count()
+    }
+
+    /// One-line dump of every used slot, for logging, e.g.
+    /// `2 entries: [0] Zora Zon (4332...) BLOCKED, [1] Ace Zon (1650...)`
+    fn describe(&self) -> String {
+        let entries: Vec<String> = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, entry)| {
+                entry.as_ref().map(|e| {
+                    format!(
+                        "[{}] {} {} ({}){}",
+                        idx,
+                        e.first_name,
+                        e.last_name,
+                        e.pc_uid,
+                        if e.blocked { " BLOCKED" } else { "" }
+                    )
+                })
+            })
+            .collect();
+
+        if entries.is_empty() {
+            "empty".to_string()
+        } else {
+            format!("{} entries: {}", entries.len(), entries.join(", "))
+        }
     }
 
     fn get_all_entries(&self) -> Vec<BuddyListEntry> {
@@ -1459,6 +1496,15 @@ impl Player {
 
     pub fn block_player(&mut self, pc_uid: i64) -> FFResult<usize> {
         self.buddy_list.block_buddy(pc_uid)
+    }
+
+    pub fn unblock_player(&mut self, pc_uid: i64) -> FFResult<usize> {
+        self.buddy_list.unblock_buddy(pc_uid)
+    }
+
+    /// Human-readable buddy list (slot, name, uid, blocked), for logging.
+    pub fn describe_buddy_list(&self) -> String {
+        self.buddy_list.describe()
     }
 
     pub fn get_num_buddies(&self) -> usize {

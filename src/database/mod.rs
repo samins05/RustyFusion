@@ -205,6 +205,7 @@ define_db_api! {
     delete_player(&self, pc_uid: BigInt) -> ();
     is_code_redeemed(&self, pc_uid: BigInt, code: &str) -> bool;
     record_code_redemption(&self, pc_uid: BigInt, code: &str) -> ();
+    delete_buddy(&self, pc_uid: BigInt, buddy_uid: BigInt) -> ();
 }
 
 fn format_db_conn_error(parent_error: FFError) -> FFError {

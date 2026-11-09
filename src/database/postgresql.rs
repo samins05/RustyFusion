@@ -847,6 +847,13 @@ impl DbImpl for PostgresDatabase {
         assert_eq!(updated, 1);
         Ok(())
     }
+
+    async fn delete_buddy(&self, pc_uid: BigInt, buddy_uid: BigInt) -> FFResult<()> {
+        let mut client = self.get_client().await?;
+        // 0 rows is fine: the buddyship may already be gone
+        Self::exec(&mut client, "delete_buddy", &[&pc_uid, &buddy_uid]).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
