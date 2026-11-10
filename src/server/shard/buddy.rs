@@ -14,6 +14,7 @@ use crate::{
 use std::time::SystemTime;
 
 const ERROR_CODE_BUDDY_DENY: i32 = 6;
+const ERROR_CODE_SET_PC_BLOCK_DENY: i32 = 10;
 
 pub fn get_buddy_state(clients: &ClientMap, state: &mut ShardServerState) -> FFResult<()> {
     let client = clients.get_sender();
@@ -501,6 +502,7 @@ pub fn pc_buddy_warp(
     })
 }
 
+// block a buddy
 pub fn pc_set_buddy_block(
     pkt: Packet,
     clients: &ClientMap,
@@ -558,7 +560,8 @@ pub fn pc_set_buddy_block(
     Ok(())
 }
 
-pub fn unignore_buddy(
+// block/ignore a player that isn't a buddy 
+pub fn ignore_player(
     pkt: Packet,
     client: &ClientMap,
     state: &mut ShardServerState,
@@ -569,52 +572,81 @@ pub fn unignore_buddy(
     
     let player = state.get_player(pc_id)?;
     let player_uid = player.get_player_uid();
-    let buddy_uid = pkt.iBlock_PCUID;
+    let target_uid = pkt.iBlock_PCUID;
 
+ 
     buddy_log(
         "pc_block",
         &format!(
             "REQ  {} -> SET_PC_BLOCK target pc_id={} uid={} (on list: {})",
             player,
             pkt.iBlock_ID,
-            buddy_uid,
-            player.is_buddies_with(buddy_uid)
+            target_uid,
+            player.is_buddies_with(target_uid)
         ),
     );
     buddy_log("pc_block", &format!("list before: {}", player.describe_buddy_list()));
+    // copy out before the closure: `player` borrows `state`, and the closure needs it mutably
+    let already_listed = player.is_buddies_with(target_uid);
 
-    let player = state.get_player_mut(pc_id)?;
-    // unblock
-
-    let slot = match player.unblock_player(buddy_uid) {
-        Ok(slot) => slot,
-        Err(e) => {
-            buddy_log(
-                "pc_block",
-                &format!("FAIL {} couldn't unblock uid={}: {} (no reply sent)", player_uid, buddy_uid, e.get_msg()),
-            );
-            return Err(e);
+    (|| {
+        if already_listed {
+            return Err(FFError::build(
+                Severity::Warning,
+                format!(
+                    "[FAILED BLOCK] player {} is already buddies with {}, packet received is for non-buddies only",
+                    player_uid, target_uid,
+                ),
+            ));
         }
-    };
 
-    buddy_log("pc_block", &format!("list after:  {}", player.describe_buddy_list()));
+        // build the blocked entry from the target (read-only borrow of state).
+        // iBlock_ID is the target's pc_id on this shard; cross-shard targets fail here (TODO)
+        let target = state.get_player(pkt.iBlock_ID)?;
+        if target.get_player_uid() != target_uid {
+            return Err(FFError::build(
+                Severity::Warning,
+                format!(
+                    "[FAILED BLOCK] pc_id {} has uid {}, packet says {}",
+                    pkt.iBlock_ID,
+                    target.get_player_uid(),
+                    target_uid
+                ),
+            ));
+        }
+        let mut entry = BuddyListEntry::new(target);
+        entry.blocked = true;
 
-    let unignore_succ_pkt = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
-      iBlock_ID: pkt.iBlock_ID, // the unignored player's pc_id, not the sender's
-      iBlock_PCUID: buddy_uid,
-      iBuddySlot: slot as i8,
-    };
+        // one-sided: only the blocker's list changes; saved as a Blocks row
+        let player = state.get_player_mut(pc_id)?;
+        let slot = player.add_buddy(entry)?; // errors if list is full
+        buddy_log("pc_block", &format!("list after:  {}", player.describe_buddy_list()));
 
-    client.send_packet(P_FE2CL_REP_SET_PC_BLOCK_SUCC, &unignore_succ_pkt);
-    buddy_log(
-        "pc_block",
-        &format!(
-            "SENT SET_PC_BLOCK_SUCC to sender pc_id={} uid={} slot={}",
-            pkt.iBlock_ID, buddy_uid, slot
-        ),
-    );
+        let block_succ_pkt = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
+            iBlock_ID: pkt.iBlock_ID, // target's pc_id
+            iBlock_PCUID: target_uid,
+            iBuddySlot: slot as i8,
+        };
+        client.send_packet(P_FE2CL_REP_SET_PC_BLOCK_SUCC, &block_succ_pkt);
+        buddy_log(
+            "pc_block",
+            &format!(
+                "SENT SET_PC_BLOCK_SUCC to sender pc_id={} uid={} slot={}",
+                pkt.iBlock_ID, target_uid, slot
+            ),
+        );
 
-    Ok(())
+        Ok(())
+    })()
+    .catch_fail(|| {
+        let block_fail_pkt = sP_FE2CL_REP_SET_PC_BLOCK_FAIL {
+            iBlock_ID: pkt.iBlock_ID,
+            iBlock_PCUID: target_uid,
+            iErrorCode: ERROR_CODE_SET_PC_BLOCK_DENY,
+        };
+        client.send_packet(P_FE2CL_REP_SET_PC_BLOCK_FAIL, &block_fail_pkt);
+        buddy_log("pc_block", "SENT SET_PC_BLOCK_FAIL");
+    })
 }
 
 

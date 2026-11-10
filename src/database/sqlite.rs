@@ -568,7 +568,28 @@ impl SqliteDatabase {
         let rows = Self::query(conn, "load_blocked_ids", &[&player.get_uid()])?;
         for row in &rows {
             let blocked_uid: BigInt = row.get("BlockedPlayerId");
-            log_if_failed(player.block_player(blocked_uid));
+            match Self::load_buddy_entry_sync(conn, blocked_uid) {
+                Ok(Some(buddy_info)) => {
+                    log_if_failed(player.add_buddy(buddy_info));
+                    log_if_failed(player.block_player(blocked_uid));
+                }
+                Ok(None) => {
+                    log(
+                        Severity::Warning,
+                        &format!("Buddy with UID {} not found", blocked_uid),
+                    );
+                }
+                Err(e) => {
+                    log(
+                        Severity::Warning,
+                        &format!(
+                            "Failed to load buddy with UID {}: {}",
+                            blocked_uid,
+                            e.get_msg()
+                        ),
+                    );
+                }
+            }   
         }
         Ok(())
     }
