@@ -319,8 +319,10 @@ pub fn pc_rocket_style_hit(
     };
 
     let mut target_ids = Vec::new();
+    let mut claimed_ids = Vec::new(); // testbed: raw client list for rocketlab.csv
     for _ in 0..header.iTargetCnt {
         let npc_id = reader.get_struct::<sBulletTarget>()?.target_id;
+        claimed_ids.push(npc_id);
         match state.get_npc(npc_id) {
             Ok(npc) => {
                 if is_valid_hit(npc, hit_pos, bullet.effect_area){
@@ -330,6 +332,8 @@ pub fn pc_rocket_style_hit(
             Err(e) => log_error(e),
         }
     }
+
+    super::rocketlab::log_hit(state, pc_id, &bullet, hit_pos, &claimed_ids); // testbed
 
     let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &bullet, state)?;
 
