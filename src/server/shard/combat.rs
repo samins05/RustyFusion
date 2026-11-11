@@ -188,6 +188,10 @@ pub fn pc_rocket_style_fire(
     let player = state.get_player_mut(pc_id)?;
     let pkt: &sP_CL2FE_REQ_PC_ROCKET_STYLE_FIRE = pkt.get()?;
 
+
+    // TODO better validations 
+    // max target count, cooldown, against weapon stats (from above)
+
     let Some(weapon): Option<Item> = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
         return Err(FFError::build(
             Severity::Warning,
@@ -241,7 +245,6 @@ pub fn pc_rocket_style_fire(
         .map(|nano| (nano.get_id(), nano.get_stamina()))
         .unwrap_or((0, 0));
 
-    // reply to the shooter
     let resp = sP_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC {
         iSkillID: pkt.iSkillID,
         iX: pkt.iX,
@@ -259,7 +262,6 @@ pub fn pc_rocket_style_fire(
     };
     client.send_packet(P_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC, &resp);
 
-    // tell nearby players
     let bcast = sP_FE2CL_PC_ROCKET_STYLE_FIRE {
         iPC_ID: pc_id,
         iX: pkt.iX,
@@ -279,33 +281,6 @@ pub fn pc_rocket_style_fire(
         });
 
     Ok(())
-}
-
-/// Warns if a claimed target is outside our valid blast radius 
-fn warn_if_outside_blast(player: &Player, npc: &NPC, hit_pos: Position, effect_area: u32) {
-    let Ok(stats) = tdata_get().get_npc_stats(npc.ty) else {
-        return;
-    };
-
-    let half_height = stats.height / 2;
-    let npc_pos = npc.get_position();
-    let body_center = Position {
-        z: npc_pos.z + half_height as i32,
-        ..npc_pos
-    };
-
-    let slack = config_get().shard.rocket_blast_slack.get();
-    let limit = stats.radius.max(half_height) + effect_area + slack;
-    let distance = hit_pos.distance_to(&body_center);
-    if distance >= limit {
-        log(
-            Severity::Warning,
-            &format!(
-                "{} rocket hit claimed {} out of range: distance {} >= limit {} (hit {:?}, body center {:?})",
-                player, npc, distance, limit, hit_pos, body_center
-            ),
-        );
-    }
 }
 
 pub fn pc_rocket_style_hit(
@@ -340,8 +315,9 @@ pub fn pc_rocket_style_hit(
         let npc_id = reader.get_struct::<sBulletTarget>()?.target_id;
         match state.get_npc(npc_id) {
             Ok(npc) => {
-                warn_if_outside_blast(player, npc, hit_pos, bullet.effect_area);
-                target_ids.push(npc.get_id());
+                if is_valid_hit(npc, hit_pos, bullet.effect_area){
+                    target_ids.push(npc.get_id());
+                }
             }
             Err(e) => log_error(e),
         }
@@ -582,4 +558,27 @@ pub fn nano_skill_use(
     }
 
     Ok(())
+}
+
+// anti cheat check
+fn is_valid_hit(
+    npc: &NPC, 
+    hit_pos: Position, 
+    effect_area: u32
+) -> bool{
+    let Ok(stats) = tdata_get().get_npc_stats(npc.ty) else {
+        return false;
+    };
+
+    let half_height = stats.height / 2;
+    let npc_pos = npc.get_position();
+    // mob server positions are from the feet
+    let body_center = Position {
+        z: npc_pos.z + half_height as i32,
+        ..npc_pos
+    };
+
+    let limit = stats.radius.max(half_height) + effect_area;
+    let distance = hit_pos.distance_to(&body_center);
+    return distance < limit;
 }

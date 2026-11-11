@@ -144,10 +144,6 @@ max_channel_pop = 100 # how many players are allowed per channel.
 #: usize
 visibility_range = 1 # how far (chunks) game clients can see entities
 
-#: u32
-rocket_blast_slack = 25 # extra allowance (game units) in the rocket hit range check,
-                        # to cover mobs moving between the client's and server's view
-
 #: u64
 autosave_interval = 5 # how often (minutes) to save all players to the database
 
