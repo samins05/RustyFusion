@@ -1333,8 +1333,10 @@ mod commands {
                 );
             }
 
-            let parsed: Result<Vec<i32>, _> =
-                args[1].split(',').map(|t| t.trim().parse::<i32>()).collect();
+            let parsed: Result<Vec<i32>, _> = args[1]
+                .split(',')
+                .map(|t| t.trim().parse::<i32>())
+                .collect();
             let types = match parsed {
                 Ok(types) if !types.is_empty() => types,
                 _ => return send_system_message(client, "Invalid NPC type list"),

@@ -53,7 +53,7 @@ const MAX_TARGETS: usize = 3;
 const BATTERY_BASE_COST: u32 = 6;
 
 const FIRE_LAG_ALLOWANCE: Duration = Duration::from_millis(300);
-const HIT_EXPIRY_ALLOWANCE: Duration = Duration::from_millis(1000);
+pub(super) const HIT_EXPIRY_ALLOWANCE: Duration = Duration::from_millis(1000);
 
 pub fn pc_attack_npcs(
     pkt: Packet,
@@ -470,7 +470,7 @@ pub fn pc_projectile_hit(
 
     let mut hits = Vec::new();
     let mut seen_ids = HashSet::new();
-    for target in targets {
+    for target in &targets {
         let target_id = target.target_id;
         // player and NPC ids are separate, so a PC id must not be looked up as an NPC
         match CharType::try_from(target.character_type) {
@@ -524,6 +524,10 @@ pub fn pc_projectile_hit(
             hits.push((npc.get_id(), distance));
         }
     }
+
+    // testbed: raw client list for rocketlab.csv, logged before damage is applied
+    let claimed_ids: Vec<i32> = targets.iter().map(|t| t.target_id).collect();
+    super::rocketlab::log_hit(state, pc_id, &projectile, hit_pos, &claimed_ids);
 
     let target_ids = closest_targets(hits, projectile.max_targets);
 

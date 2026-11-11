@@ -34,6 +34,7 @@ mod mission;
 mod nano;
 mod npc;
 mod pc;
+mod rocketlab;
 mod trade;
 mod transport;
 
