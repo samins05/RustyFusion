@@ -2,7 +2,7 @@ use std::{
     any::Any,
     collections::HashMap,
     fmt::Display,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -435,7 +435,7 @@ pub struct Bullet {
     pub effect_area: u32,
     pub start_pos: Position,
     pub end_pos: Position,
-    pub end_time: SystemTime,
+    pub end_time: Instant,
 }
 
 impl From<&Bullet> for sPCBullet{
@@ -1436,9 +1436,14 @@ impl Player {
     }
 
     pub fn add_bullet(&mut self, bullet: Bullet) -> Option<i8> {
+        // clean up expired bullets 
+        let now = Instant::now();
+        self.owned_bullets.retain(|_, b| now < b.end_time);
+
         if self.owned_bullets.len() == SIZEOF_PC_BULLET_SLOT as usize {
             return None;
         }
+
         let bullet_id = self.latest_bullet_id;
         self.latest_bullet_id += 1;
         if self.latest_bullet_id == SIZEOF_PC_BULLET_SLOT as i8 {

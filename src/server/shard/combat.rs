@@ -1,8 +1,7 @@
-use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use crate::{
-    config::config_get,
-    entity::{Combatant, Entity, EntityID, Bullet, BulletType, Player, NPC},
+    entity::{Combatant, Entity, EntityID, Bullet, BulletType, NPC},
     enums::{ItemLocation, SkillTargetType, TargetType},
     error::*,
     defines::{EQUIP_SLOT_HAND, WPN_EQUIP_TYPE_DH_ROCKET},
@@ -207,6 +206,16 @@ pub fn pc_rocket_style_fire(
         ));
     }
 
+    let Some(deliver_time_ms) = weapon_stats
+        .deliver_time
+        .and_then(|ms| u64::try_from(ms).ok())
+    else {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} fired weapon {} with no valid deliver time", player, weapon.id),
+        ));
+    };
+
     let weapon_boosts = player.get_weapon_boosts();
     let weapon_boosts_needed = BATTERY_BASE_COST + weapon_stats.required_level as u32;
 
@@ -226,7 +235,7 @@ pub fn pc_rocket_style_fire(
         effect_area: weapon_stats.effect_area.unwrap_or(0) as u32,
         start_pos: Position { x: pkt.iX, y: pkt.iY, z: pkt.iZ},
         end_pos: Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ},
-        end_time: SystemTime::now(),
+        end_time: Instant::now() + Duration::from_millis(deliver_time_ms),
     };
 
     let action_message = "shoot rocket";
@@ -308,7 +317,6 @@ pub fn pc_rocket_style_hit(
         y: header.iY,
         z: header.iZ,
     };
-    let player = state.get_player(pc_id)?;
 
     let mut target_ids = Vec::new();
     for _ in 0..header.iTargetCnt {
