@@ -751,7 +751,7 @@ pub fn gm_npc_summon(
     for _ in 0..count {
         let npc_id = entity_map.gen_next_npc_id();
         let npc = NPC::new(npc_id, npc_type, spawn_pos, spawn_angle, spawn_instance_id).unwrap();
-        helpers::spawn_temp_npc(entity_map, npc);
+        helpers::spawn_temp_npc(entity_map, npc, true);
     }
 
     Ok(())
@@ -779,7 +779,7 @@ pub fn gm_npc_group_summon(
         npc.set_position(spawn_pos);
         npc.set_rotation(spawn_angle);
         npc.instance_id = spawn_instance_id;
-        helpers::spawn_temp_npc(entity_map, npc);
+        helpers::spawn_temp_npc(entity_map, npc, true);
     }
 
     Ok(())
@@ -803,7 +803,7 @@ pub fn gm_npc_unsummon(
     Ok(())
 }
 
-mod helpers {
+pub(super) mod helpers {
     use crate::{ai, helpers::send_announcement};
 
     use super::*;
@@ -833,9 +833,13 @@ mod helpers {
         FFError::build(Severity::Warning, err_msg)
     }
 
-    pub fn spawn_temp_npc(entity_map: &mut EntityMap, mut npc: NPC) {
+    pub fn spawn_temp_npc(entity_map: &mut EntityMap, mut npc: NPC, with_ai: bool) {
         npc.summoned = true;
-        let (ai, tick_mode) = ai::make_for_npc(&npc, true);
+        let (ai, tick_mode) = if with_ai {
+            ai::make_for_npc(&npc, true)
+        } else {
+            (None, TickMode::Never)
+        };
         npc.ai = ai;
         let chunk_coords = npc.get_chunk_coords();
         let eid = entity_map.track(Box::new(npc), tick_mode);
