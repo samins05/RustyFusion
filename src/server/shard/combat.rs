@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    entity::{Combatant, Entity, EntityID, Bullet, BulletType, NPC},
+    entity::{Combatant, Entity, EntityID, Projectile, ProjectileKind, NPC},
     enums::{ItemLocation, SkillTargetType, TargetType},
     error::*,
-    defines::{EQUIP_SLOT_HAND, WPN_EQUIP_TYPE_DH_ROCKET},
+    defines::EQUIP_SLOT_HAND,
     net::{
         packet::{PacketID::*, *},
         ClientMap,
@@ -48,6 +48,15 @@ impl FFPacket for sBulletTarget {}
 
 const MAX_TARGETS: usize = 3;
 const BATTERY_BASE_COST: u32 = 6;
+/// How early a FIRE may arrive (network jitter) and still count. Measured locally: up to 108 ms early.
+// TODO tune against real-latency players
+const FIRE_LAG_ALLOWANCE: Duration = Duration::from_millis(150);
+/// How long a fired projectile waits for its HIT before its slot is freed.
+// TODO figure out the best expiry. The client explodes projectiles after m_iDurationTime
+// (rockets 1.4 s, grenades 2.5 s, counted from FIRE_SUCC), so HITs reach us 2-52 ms
+// after that locally (one 305 ms outlier) plus real ping. Options: m_iDurationTime
+// + a measured lag allowance, or keep a flat value like this.
+const PROJECTILE_EXPIRY: Duration = Duration::from_millis(4000);
 
 pub fn pc_attack_npcs(
     pkt: Packet,
@@ -183,36 +192,148 @@ pub fn pc_rocket_style_fire(
 ) -> FFResult<()> {
     let client = clients.get_sender();
     let pc_id = client.get_player_id()?;
-    let player = state.get_player_mut(pc_id)?;
     let pkt: &sP_CL2FE_REQ_PC_ROCKET_STYLE_FIRE = pkt.get()?;
 
-
     // TODO validate range -> table data not accurate so actual range
+    // server position, same as grenades; sent back in place of the client's iX/Y/Z
+    let start_pos = state.get_player(pc_id)?.get_position();
+    let end_pos = Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ };
+
+    let Some(projectile_id) = fire_projectile(ProjectileKind::Rocket, start_pos, end_pos, pc_id, state)? else {
+        return Ok(());
+    };
+
+    let player = state.get_player(pc_id)?;
+    let spc_bullet = sPCBullet::from(player.get_projectile(projectile_id)?);
+    let (nano_id, nano_stamina) = player
+        .get_active_nano()
+        .map(|nano| (nano.get_id(), nano.get_stamina()))
+        .unwrap_or((0, 0));
+
+    let resp = sP_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC {
+        iSkillID: pkt.iSkillID,
+        iX: start_pos.x,
+        iY: start_pos.y,
+        iZ: start_pos.z,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: projectile_id,
+        Bullet: spc_bullet,
+        iBatteryW: player.get_weapon_boosts() as i32,
+        bNanoDeactive: 0,
+        iNanoID: nano_id,
+        iNanoStamina: nano_stamina,
+    };
+    client.send_packet(P_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC, &resp);
+
+    let bcast = sP_FE2CL_PC_ROCKET_STYLE_FIRE {
+        iPC_ID: pc_id,
+        iX: start_pos.x,
+        iY: start_pos.y,
+        iZ: start_pos.z,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: projectile_id,
+        Bullet: spc_bullet,
+        bNanoDeactive: 0,
+    };
+    state
+        .entity_map
+        .for_each_around(EntityID::Player(pc_id), |c| {
+            c.send_packet(P_FE2CL_PC_ROCKET_STYLE_FIRE, &bcast);
+        });
+
+    Ok(())
+}
+
+pub fn pc_grenade_style_fire(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let client = clients.get_sender();
+    let pc_id = client.get_player_id()?;
+    let pkt: &sP_CL2FE_REQ_PC_GRENADE_STYLE_FIRE = pkt.get()?;
+
+    // grenade FIRE has no launch point; the client throws from the avatar's position
+    let start_pos = state.get_player(pc_id)?.get_position();
+    let end_pos = Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ };
+
+    let Some(projectile_id) = fire_projectile(ProjectileKind::Grenade, start_pos, end_pos, pc_id, state)? else {
+        return Ok(());
+    };
+
+    let player = state.get_player(pc_id)?;
+    let spc_bullet = sPCBullet::from(player.get_projectile(projectile_id)?);
+    let (nano_id, nano_stamina) = player
+        .get_active_nano()
+        .map(|nano| (nano.get_id(), nano.get_stamina()))
+        .unwrap_or((0, 0));
+
+    let resp = sP_FE2CL_REP_PC_GRENADE_STYLE_FIRE_SUCC {
+        iSkillID: pkt.iSkillID,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: projectile_id,
+        Bullet: spc_bullet,
+        iBatteryW: player.get_weapon_boosts() as i32,
+        bNanoDeactive: 0,
+        iNanoID: nano_id,
+        iNanoStamina: nano_stamina,
+    };
+    client.send_packet(P_FE2CL_REP_PC_GRENADE_STYLE_FIRE_SUCC, &resp);
+
+    let bcast = sP_FE2CL_PC_GRENADE_STYLE_FIRE {
+        iPC_ID: pc_id,
+        iToX: pkt.iToX,
+        iToY: pkt.iToY,
+        iToZ: pkt.iToZ,
+        iBulletID: projectile_id,
+        Bullet: spc_bullet,
+        bNanoDeactive: 0,
+    };
+    state
+        .entity_map
+        .for_each_around(EntityID::Player(pc_id), |c| {
+            c.send_packet(P_FE2CL_PC_GRENADE_STYLE_FIRE, &bcast);
+        });
+
+    Ok(())
+}
+
+/// Shared FIRE logic: weapon + table data checks, cooldown, boosts, projectile slot.
+/// Returns the new projectile's id, or None when the projectile slots are full (not an error).
+fn fire_projectile(
+    kind: ProjectileKind,
+    start_pos: Position,
+    end_pos: Position,
+    pc_id: i32,
+    state: &mut ShardServerState,
+) -> FFResult<Option<i8>> {
+    let player = state.get_player_mut(pc_id)?;
 
     let Some(weapon) = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
         return Err(FFError::build(
             Severity::Warning,
-            format!("{} tried to fire a rocket with no item equipped", player),
+            format!("{} tried to fire a {} with no item equipped", player, kind.name()),
         ));
     };
-    
+
     let weapon_stats = weapon.get_stats()?;
-    if weapon_stats.equip_type != Some(WPN_EQUIP_TYPE_DH_ROCKET as i32) {
+    if weapon_stats.equip_type != Some(kind.equip_type()) {
         return Err(FFError::build(
             Severity::Warning,
-            format!("{} tried to fire a rocket with a non-launcher weapon {}", player, weapon.id),
+            format!(
+                "{} tried to fire a {} with the wrong weapon type {}",
+                player,
+                kind.name(),
+                weapon.id
+            ),
         ));
     }
-
-    let Some(deliver_time_ms) = weapon_stats
-        .deliver_time
-        .and_then(|ms| u64::try_from(ms).ok())
-    else {
-        return Err(FFError::build(
-            Severity::Warning,
-            format!("{} fired weapon {} with no valid deliver time", player, weapon.id),
-        ));
-    };
 
     let Some(max_targets) = weapon_stats
         .target_number
@@ -236,18 +357,24 @@ pub fn pc_rocket_style_fire(
         ));
     };
 
+    // GCRA fire limit: a shot may arrive up to FIRE_LAG_ALLOWANCE before it's due,
+    // but the next shot is still booked from the due time, so early shots never add up
+    // TODO weapon swap: next_shot_allowed is booked with the PREVIOUS weapon's cooldown, so the
+    // first shot right after a swap can be rejected (seen: rocket -> grenade, 278 ms early).
+    // The client allows it (doesn't carry cooldowns across swaps), but swap-spamming must not
+    // skip cooldowns. Option: store the last shot's due time instead and compute
+    // `last_due + current weapon's cooldown` at check time (old cooldown approach behaved like this).
     let now = Instant::now();
-    // TODO test for network jitter; legit shots may arrive under fire_delay and need a tolerance
-    if let Some(last_shot) = player.get_last_shot_time() {
-        let since_last = now - last_shot;
-        if since_last < fire_delay {
+    if let Some(next_allowed) = player.get_next_shot_allowed() {
+        if now + FIRE_LAG_ALLOWANCE < next_allowed {
             return Err(FFError::build(
                 Severity::Warning,
                 format!(
-                    "{} fired weapon {} too fast ({} ms since last shot, min {} ms)",
+                    "{} fired weapon {} too fast ({} ms before it was due, allowance {} ms, cooldown {} ms)",
                     player,
                     weapon.id,
-                    since_last.as_millis(),
+                    (next_allowed - now).as_millis(),
+                    FIRE_LAG_ALLOWANCE.as_millis(),
                     fire_delay.as_millis()
                 ),
             ));
@@ -265,74 +392,37 @@ pub fn pc_rocket_style_fire(
         false
     };
 
-    let bullet = Bullet {
-        bullet_type: BulletType::Rocket(weapon.id),
+    let projectile = Projectile {
+        kind,
+        weapon_id: weapon.id,
         single_power: player.get_single_power(),
         multi_power: player.get_multi_power(),
         charged: weapon_charged,
         effect_area: weapon_stats.effect_area.unwrap_or(0) as u32,
         max_targets,
-        start_pos: Position { x: pkt.iX, y: pkt.iY, z: pkt.iZ},
-        end_pos: Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ},
-        end_time: now + Duration::from_millis(deliver_time_ms),
+        start_pos,
+        end_pos,
+        fire_time: now,
+        end_time: now + PROJECTILE_EXPIRY,
     };
 
-    let action_message = "shoot rocket";
-
-    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
-    let Some(bullet_id) = player.add_bullet(bullet) else {
+    let Some(projectile_id) = player.add_projectile(projectile) else {
         log(
             Severity::Debug,
-            &format!("{} tried to {} but has too many bullets", player, action_message),
+            &format!("{} tried to fire a {} but has too many projectiles", player, kind.name()),
         );
-        return Ok(());
+        return Ok(None);
     };
-    player.set_last_shot_time(now);
+    // book from when this shot was due (or now, if it came late) so waiting can't bank shots
+    let due = player.get_next_shot_allowed().map_or(now, |next_allowed| next_allowed.max(now));
+    player.set_next_shot_allowed(due + fire_delay);
 
-    let (nano_id, nano_stamina) = player
-        .get_active_nano()
-        .map(|nano| (nano.get_id(), nano.get_stamina()))
-        .unwrap_or((0, 0));
-
-    let resp = sP_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC {
-        iSkillID: pkt.iSkillID,
-        iX: pkt.iX,
-        iY: pkt.iY,
-        iZ: pkt.iZ,
-        iToX: pkt.iToX,
-        iToY: pkt.iToY,
-        iToZ: pkt.iToZ,
-        iBulletID: bullet_id,
-        Bullet: spc_bullet,
-        iBatteryW: player.get_weapon_boosts() as i32,
-        bNanoDeactive: 0,
-        iNanoID: nano_id,
-        iNanoStamina: nano_stamina,
-    };
-    client.send_packet(P_FE2CL_REP_PC_ROCKET_STYLE_FIRE_SUCC, &resp);
-
-    let bcast = sP_FE2CL_PC_ROCKET_STYLE_FIRE {
-        iPC_ID: pc_id,
-        iX: pkt.iX,
-        iY: pkt.iY,
-        iZ: pkt.iZ,
-        iToX: pkt.iToX,
-        iToY: pkt.iToY,
-        iToZ: pkt.iToZ,
-        iBulletID: bullet_id,
-        Bullet: spc_bullet,
-        bNanoDeactive: 0,
-    };
-    state
-        .entity_map
-        .for_each_around(EntityID::Player(pc_id), |c| {
-            c.send_packet(P_FE2CL_PC_ROCKET_STYLE_FIRE, &bcast);
-        });
-
-    Ok(())
+    Ok(Some(projectile_id))
 }
 
-pub fn pc_rocket_style_hit(
+/// The client sends ROCKET_STYLE_HIT for rockets AND grenades (cnWarHead.cs:474),
+/// so the projectile kind comes from the stored projectile, not the packet.
+pub fn pc_projectile_hit(
     pkt: Packet,
     clients: &ClientMap,
     state: &mut ShardServerState,
@@ -342,15 +432,45 @@ pub fn pc_rocket_style_hit(
 
     let mut reader = PacketReader::new(&pkt);
     let header: &sP_CL2FE_REQ_PC_ROCKET_STYLE_HIT = reader.get_struct()?;
-    let bullet_id = header.iBulletID;
+    let projectile_id = header.iBulletID;
 
-    let Some(bullet) = player.remove_bullet(bullet_id) else {
+    let Some(projectile) = player.remove_projectile(projectile_id) else {
         return Err(FFError::build(
             Severity::Warning,
-            format!("{} reported a hit for unknown or expired bullet {}", player, bullet_id),
+            format!("{} reported a hit for unknown projectile {}", player, projectile_id),
         ));
     };
-    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
+
+    // expiry is checked here (not in remove_projectile) so the flight time can be logged
+    let now = Instant::now();
+    let flight_ms = (now - projectile.fire_time).as_millis();
+    let limit_ms = (projectile.end_time - projectile.fire_time).as_millis();
+    if now >= projectile.end_time {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!(
+                "[projectile-timing] {} reported a {} hit for expired projectile {} ({} ms after fire, limit {} ms)",
+                player,
+                projectile.kind.name(),
+                projectile_id,
+                flight_ms,
+                limit_ms
+            ),
+        ));
+    }
+    log(
+        Severity::Debug,
+        &format!(
+            "[projectile-timing] {} {} projectile {} hit {} ms after fire (limit {} ms, {} targets claimed)",
+            player,
+            projectile.kind.name(),
+            projectile_id,
+            flight_ms,
+            limit_ms,
+            header.iTargetCnt
+        ),
+    );
+    let spc_bullet: sPCBullet = sPCBullet::from(&projectile);
 
     let hit_pos = Position {
         x: header.iX,
@@ -370,14 +490,18 @@ pub fn pc_rocket_style_hit(
                     log(
                         Severity::Warning,
                         &format!(
-                            "Player {} rocket hit claimed {} in a different instance ({} != {})",
-                            pc_id, npc, npc.instance_id, player_instance
+                            "Player {} {} hit claimed {} in a different instance ({} != {})",
+                            pc_id,
+                            projectile.kind.name(),
+                            npc,
+                            npc.instance_id,
+                            player_instance
                         ),
                     );
                     continue;
                 }
                 // drop distances if outside anticheat
-                if let Some(distance) = hit_to_mob_distance(npc, hit_pos, bullet.effect_area) {
+                if let Some(distance) = hit_to_mob_distance(npc, hit_pos, projectile.effect_area) {
                     hits.push((npc.get_id(), distance));
                 }
             }
@@ -385,17 +509,30 @@ pub fn pc_rocket_style_hit(
         }
     }
 
-    let target_ids = closest_targets(hits, bullet.max_targets);
+    let target_ids = closest_targets(hits, projectile.max_targets);
 
-    let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &bullet, state)?;
+    let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &projectile, state)?;
 
-    let mut bcast =
-        PacketBuilder::new(P_FE2CL_PC_ROCKET_STYLE_HIT).with(&sP_FE2CL_PC_ROCKET_STYLE_HIT {
-            iPC_ID: pc_id,
-            iBulletID: bullet_id,
-            Bullet: spc_bullet,
-            iTargetCnt: results.len() as i32,
-        });
+    // observers handle the two HIT broadcasts separately
+    let target_cnt = results.len() as i32;
+    let mut bcast = match projectile.kind {
+        ProjectileKind::Rocket => {
+            PacketBuilder::new(P_FE2CL_PC_ROCKET_STYLE_HIT).with(&sP_FE2CL_PC_ROCKET_STYLE_HIT {
+                iPC_ID: pc_id,
+                iBulletID: projectile_id,
+                Bullet: spc_bullet,
+                iTargetCnt: target_cnt,
+            })
+        }
+        ProjectileKind::Grenade => {
+            PacketBuilder::new(P_FE2CL_PC_GRENADE_STYLE_HIT).with(&sP_FE2CL_PC_GRENADE_STYLE_HIT {
+                iPC_ID: pc_id,
+                iBulletID: projectile_id,
+                Bullet: spc_bullet,
+                iTargetCnt: target_cnt,
+            })
+        }
+    };
     for result in &results {
         bcast.push(result);
     }

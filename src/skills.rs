@@ -7,7 +7,7 @@ use rand::Rng;
 
 use crate::{
     defines::*,
-    entity::{Combatant, EntityID, Bullet},
+    entity::{Combatant, EntityID, Projectile},
     enums::{
         BuffID, BuffType, CombatStyle, SkillTargetType, SkillType, TargetType, TimeBuffUpdate,
     },
@@ -625,7 +625,7 @@ pub fn do_basic_attack(
 pub fn do_projectile_attack(
     attacker_id: EntityID,
     target_ids: &[EntityID],
-    bullet: &Bullet,
+    projectile: &Projectile,
     state: &mut ShardServerState,
 ) -> FFResult<Vec<sAttackResult>> {
     const CRIT_CHANCE: f32 = 0.05;
@@ -640,13 +640,13 @@ pub fn do_projectile_attack(
 
     let attack = BasicAttack {
         power: if target_ids.len() == 1 {
-            bullet.single_power
+            projectile.single_power
         } else {
-            bullet.multi_power
+            projectile.multi_power
         },
         crit_chance: Some(CRIT_CHANCE),
         attack_style: state.get_combatant(attacker_id)?.get_style(),
-        charged: bullet.charged,
+        charged: projectile.charged,
     };
 
     let mut attack_results = Vec::with_capacity(target_ids.len());

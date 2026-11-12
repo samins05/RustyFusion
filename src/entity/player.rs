@@ -420,15 +420,31 @@ impl BuddyList {
     }
 }
 
-#[derive(Debug, Clone)]
-pub enum BulletType {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectileKind {
+    Rocket,
     Grenade,
-    Rocket(i16),
+}
+impl ProjectileKind {
+    pub fn equip_type(self) -> i32 {
+        match self {
+            ProjectileKind::Rocket => WPN_EQUIP_TYPE_DH_ROCKET as i32,
+            ProjectileKind::Grenade => WPN_EQUIP_TYPE_OH_THROW as i32,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ProjectileKind::Rocket => "rocket",
+            ProjectileKind::Grenade => "grenade",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
-pub struct Bullet {
-    pub bullet_type: BulletType,
+pub struct Projectile {
+    pub kind: ProjectileKind,
+    pub weapon_id: i16,
     pub single_power: i32,
     pub multi_power: i32,
     pub charged: bool,
@@ -436,17 +452,16 @@ pub struct Bullet {
     pub max_targets: usize,
     pub start_pos: Position,
     pub end_pos: Position,
+    pub fire_time: Instant,
     pub end_time: Instant,
 }
 
-impl From<&Bullet> for sPCBullet{
-    fn from(value: &Bullet) -> Self {
+impl From<&Projectile> for sPCBullet{
+    fn from(value: &Projectile) -> Self {
         Self {
             eAT: 0,
-            iID: match value.bullet_type {
-                BulletType::Grenade => 1,
-                BulletType::Rocket(item_id) => item_id as i32,
-            },
+            // the client loads the weapon's table data from this, for grenades too
+            iID: value.weapon_id as i32,
             bCharged: value.charged as i32,
         }
     }
@@ -486,8 +501,8 @@ pub struct Player {
     fusion_matter: u32,
     nano_potions: u32,
     weapon_boosts: u32,
-    owned_bullets: [Option<Bullet>; SIZEOF_PC_BULLET_SLOT as usize],
-    last_shot_time: Option<Instant>,
+    owned_projectiles: [Option<Projectile>; SIZEOF_PC_BULLET_SLOT as usize],
+    next_shot_allowed: Option<Instant>,
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1441,30 +1456,42 @@ impl Player {
         self.nano_potions
     }
 
-    pub fn get_last_shot_time(&self) -> Option<Instant> {
-        self.last_shot_time
+    pub fn get_next_shot_allowed(&self) -> Option<Instant> {
+        self.next_shot_allowed
     }
 
-    pub fn set_last_shot_time(&mut self, time: Instant) {
-        self.last_shot_time = Some(time);
+    pub fn set_next_shot_allowed(&mut self, time: Instant) {
+        self.next_shot_allowed = Some(time);
     }
 
-    pub fn add_bullet(&mut self, bullet: Bullet) -> Option<i8> {
+    pub fn add_projectile(&mut self, projectile: Projectile) -> Option<i8> {
         let now = Instant::now();
         // lazy expiry
         let slot = self
-            .owned_bullets
+            .owned_projectiles
             .iter()
             .position(|b| b.as_ref().is_none_or(|b| now >= b.end_time))?;
 
-        self.owned_bullets[slot] = Some(bullet);
+        self.owned_projectiles[slot] = Some(projectile);
         Some(slot as i8)
     }
 
-    pub fn remove_bullet(&mut self, bullet_id: i8) -> Option<Bullet> {
-        let slot = usize::try_from(bullet_id).ok()?;
-        let bullet = self.owned_bullets.get_mut(slot)?.take()?;
-        (Instant::now() < bullet.end_time).then_some(bullet)
+    pub fn get_projectile(&self, projectile_id: i8) -> FFResult<&Projectile> {
+        usize::try_from(projectile_id)
+            .ok()
+            .and_then(|slot| self.owned_projectiles.get(slot)?.as_ref())
+            .ok_or_else(|| {
+                FFError::build(
+                    Severity::Warning,
+                    format!("{} has no projectile {}", self, projectile_id),
+                )
+            })
+    }
+
+    /// Frees the slot. The caller checks `end_time` (HIT logs the flight time on expiry).
+    pub fn remove_projectile(&mut self, projectile_id: i8) -> Option<Projectile> {
+        let slot = usize::try_from(projectile_id).ok()?;
+        self.owned_projectiles.get_mut(slot)?.take()
     }
 
     pub fn set_pre_warp(&mut self) {

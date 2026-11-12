@@ -269,7 +269,6 @@ pub struct ItemStats {
     pub speed: Option<i32>,
     pub effect_area: Option<i32>,
     pub equip_type: Option<i32>,
-    pub deliver_time: Option<i32>,
     pub target_number: Option<i32>,
     pub delay_time: Option<i32>,
 }
