@@ -9,7 +9,6 @@ use crate::{
         packet::{PacketID::*, *},
         ClientMap,
     },
-    item::{Item},
     skills::{self, SkillResult},
     state::ShardServerState,
     tabledata::tdata_get,
@@ -188,10 +187,9 @@ pub fn pc_rocket_style_fire(
     let pkt: &sP_CL2FE_REQ_PC_ROCKET_STYLE_FIRE = pkt.get()?;
 
 
-    // TODO better validations 
-    // max target count, cooldown, against weapon stats (from above)
+    // TODO validate range -> table data not accurate so actual range
 
-    let Some(weapon): Option<Item> = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
+    let Some(weapon) = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
         return Err(FFError::build(
             Severity::Warning,
             format!("{} tried to fire a rocket with no item equipped", player),
@@ -216,6 +214,46 @@ pub fn pc_rocket_style_fire(
         ));
     };
 
+    let Some(max_targets) = weapon_stats
+        .target_number
+        .and_then(|n| usize::try_from(n).ok())
+    else {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} fired weapon {} with no valid target number", player, weapon.id),
+        ));
+    };
+
+    // m_iDelayTime is in tenths of a second
+    let Some(fire_delay) = weapon_stats
+        .delay_time
+        .and_then(|tenths| u64::try_from(tenths).ok())
+        .map(|tenths| Duration::from_millis(tenths * 100))
+    else {
+        return Err(FFError::build(
+            Severity::Warning,
+            format!("{} fired weapon {} with no valid delay time", player, weapon.id),
+        ));
+    };
+
+    let now = Instant::now();
+    // TODO test for network jitter; legit shots may arrive under fire_delay and need a tolerance
+    if let Some(last_shot) = player.get_last_shot_time() {
+        let since_last = now - last_shot;
+        if since_last < fire_delay {
+            return Err(FFError::build(
+                Severity::Warning,
+                format!(
+                    "{} fired weapon {} too fast ({} ms since last shot, min {} ms)",
+                    player,
+                    weapon.id,
+                    since_last.as_millis(),
+                    fire_delay.as_millis()
+                ),
+            ));
+        }
+    }
+
     let weapon_boosts = player.get_weapon_boosts();
     let weapon_boosts_needed = BATTERY_BASE_COST + weapon_stats.required_level as u32;
 
@@ -233,21 +271,23 @@ pub fn pc_rocket_style_fire(
         multi_power: player.get_multi_power(),
         charged: weapon_charged,
         effect_area: weapon_stats.effect_area.unwrap_or(0) as u32,
+        max_targets,
         start_pos: Position { x: pkt.iX, y: pkt.iY, z: pkt.iZ},
         end_pos: Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ},
-        end_time: Instant::now() + Duration::from_millis(deliver_time_ms),
+        end_time: now + Duration::from_millis(deliver_time_ms),
     };
 
     let action_message = "shoot rocket";
 
-    let Some(bullet_id): Option<i8> = player.add_bullet(bullet.clone()) else {
+    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
+    let Some(bullet_id) = player.add_bullet(bullet) else {
         log(
             Severity::Debug,
             &format!("{} tried to {} but has too many bullets", player, action_message),
         );
         return Ok(());
     };
-    let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
+    player.set_last_shot_time(now);
 
     let (nano_id, nano_stamina) = player
         .get_active_nano()
@@ -304,10 +344,10 @@ pub fn pc_rocket_style_hit(
     let header: &sP_CL2FE_REQ_PC_ROCKET_STYLE_HIT = reader.get_struct()?;
     let bullet_id = header.iBulletID;
 
-    let Some(bullet): Option<Bullet> = player.remove_bullet(bullet_id) else {
+    let Some(bullet) = player.remove_bullet(bullet_id) else {
         return Err(FFError::build(
             Severity::Warning,
-            format!("{} reported a hit for unknown bullet {}", player, bullet_id),
+            format!("{} reported a hit for unknown or expired bullet {}", player, bullet_id),
         ));
     };
     let spc_bullet: sPCBullet = sPCBullet::from(&bullet);
@@ -318,18 +358,34 @@ pub fn pc_rocket_style_hit(
         z: header.iZ,
     };
 
-    let mut target_ids = Vec::new();
+    let player_instance = player.instance_id;
+
+    let mut hits = Vec::new();
     for _ in 0..header.iTargetCnt {
         let npc_id = reader.get_struct::<sBulletTarget>()?.target_id;
         match state.get_npc(npc_id) {
             Ok(npc) => {
-                if is_valid_hit(npc, hit_pos, bullet.effect_area){
-                    target_ids.push(npc.get_id());
+                // NPC IDs are shard-wide, so drop mobs from other channels/instances
+                if npc.instance_id != player_instance {
+                    log(
+                        Severity::Warning,
+                        &format!(
+                            "Player {} rocket hit claimed {} in a different instance ({} != {})",
+                            pc_id, npc, npc.instance_id, player_instance
+                        ),
+                    );
+                    continue;
+                }
+                // drop distances if outside anticheat
+                if let Some(distance) = hit_to_mob_distance(npc, hit_pos, bullet.effect_area) {
+                    hits.push((npc.get_id(), distance));
                 }
             }
             Err(e) => log_error(e),
         }
     }
+
+    let target_ids = closest_targets(hits, bullet.max_targets);
 
     let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &bullet, state)?;
 
@@ -568,15 +624,9 @@ pub fn nano_skill_use(
     Ok(())
 }
 
-// anti cheat check
-fn is_valid_hit(
-    npc: &NPC, 
-    hit_pos: Position, 
-    effect_area: u32
-) -> bool{
-    let Ok(stats) = tdata_get().get_npc_stats(npc.ty) else {
-        return false;
-    };
+// distance from the hit to the mob's body center
+fn hit_to_mob_distance(npc: &NPC, hit_pos: Position, effect_area: u32) -> Option<u32> {
+    let stats = tdata_get().get_npc_stats(npc.ty).ok()?;
 
     let half_height = stats.height / 2;
     let npc_pos = npc.get_position();
@@ -588,5 +638,11 @@ fn is_valid_hit(
 
     let limit = stats.radius.max(half_height) + effect_area;
     let distance = hit_pos.distance_to(&body_center);
-    return distance < limit;
+    (distance < limit).then_some(distance)
+}
+
+fn closest_targets(mut hits: Vec<(EntityID, u32)>, max_targets: usize) -> Vec<EntityID> {
+    hits.sort_by_key(|&(_, distance)| distance);
+    hits.truncate(max_targets);
+    hits.into_iter().map(|(id, _)| id).collect()
 }

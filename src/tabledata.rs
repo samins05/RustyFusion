@@ -1184,6 +1184,8 @@ fn load_item_data(
                 effect_area: data.m_iEffectArea,
                 equip_type: data.m_iEquipType,
                 deliver_time: data.m_iDeliverTime,
+                target_number: data.m_iTargetNumber,
+                delay_time: data.m_iDelayTime,
             };
             map.insert(key, data);
         }

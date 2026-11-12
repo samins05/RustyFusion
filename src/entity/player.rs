@@ -433,6 +433,7 @@ pub struct Bullet {
     pub multi_power: i32,
     pub charged: bool,
     pub effect_area: u32,
+    pub max_targets: usize,
     pub start_pos: Position,
     pub end_pos: Position,
     pub end_time: Instant,
@@ -486,6 +487,7 @@ pub struct Player {
     nano_potions: u32,
     weapon_boosts: u32,
     owned_bullets: [Option<Bullet>; SIZEOF_PC_BULLET_SLOT as usize],
+    last_shot_time: Option<Instant>,
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1434,6 +1436,19 @@ impl Player {
         self.weapon_boosts
     }
 
+    pub fn set_nano_potions(&mut self, nano_potions: u32) -> u32 {
+        self.nano_potions = clamp(nano_potions, 0, PC_BATTERY_MAX);
+        self.nano_potions
+    }
+
+    pub fn get_last_shot_time(&self) -> Option<Instant> {
+        self.last_shot_time
+    }
+
+    pub fn set_last_shot_time(&mut self, time: Instant) {
+        self.last_shot_time = Some(time);
+    }
+
     pub fn add_bullet(&mut self, bullet: Bullet) -> Option<i8> {
         let now = Instant::now();
         // lazy expiry
@@ -1450,11 +1465,6 @@ impl Player {
         let slot = usize::try_from(bullet_id).ok()?;
         let bullet = self.owned_bullets.get_mut(slot)?.take()?;
         (Instant::now() < bullet.end_time).then_some(bullet)
-    }
-
-    pub fn set_nano_potions(&mut self, nano_potions: u32) -> u32 {
-        self.nano_potions = clamp(nano_potions, 0, PC_BATTERY_MAX);
-        self.nano_potions
     }
 
     pub fn set_pre_warp(&mut self) {
