@@ -485,8 +485,7 @@ pub struct Player {
     fusion_matter: u32,
     nano_potions: u32,
     weapon_boosts: u32,
-    owned_bullets: HashMap<i8, Bullet>,
-    latest_bullet_id: i8,
+    owned_bullets: [Option<Bullet>; SIZEOF_PC_BULLET_SLOT as usize],
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1436,26 +1435,21 @@ impl Player {
     }
 
     pub fn add_bullet(&mut self, bullet: Bullet) -> Option<i8> {
-        // clean up expired bullets 
         let now = Instant::now();
-        self.owned_bullets.retain(|_, b| now < b.end_time);
+        // lazy expiry
+        let slot = self
+            .owned_bullets
+            .iter()
+            .position(|b| b.as_ref().is_none_or(|b| now >= b.end_time))?;
 
-        if self.owned_bullets.len() == SIZEOF_PC_BULLET_SLOT as usize {
-            return None;
-        }
-
-        let bullet_id = self.latest_bullet_id;
-        self.latest_bullet_id += 1;
-        if self.latest_bullet_id == SIZEOF_PC_BULLET_SLOT as i8 {
-            self.latest_bullet_id = 0;
-        }
-
-        self.owned_bullets.insert(bullet_id, bullet);
-        Some(bullet_id)
+        self.owned_bullets[slot] = Some(bullet);
+        Some(slot as i8)
     }
 
     pub fn remove_bullet(&mut self, bullet_id: i8) -> Option<Bullet> {
-        self.owned_bullets.remove(&bullet_id)
+        let slot = usize::try_from(bullet_id).ok()?;
+        let bullet = self.owned_bullets.get_mut(slot)?.take()?;
+        (Instant::now() < bullet.end_time).then_some(bullet)
     }
 
     pub fn set_nano_potions(&mut self, nano_potions: u32) -> u32 {
