@@ -271,6 +271,7 @@ pub struct ItemStats {
     pub equip_type: Option<i32>,
     pub target_number: Option<i32>,
     pub delay_time: Option<i32>,
+    pub duration_time: Option<i32>,
 }
 
 pub struct VendorItem {

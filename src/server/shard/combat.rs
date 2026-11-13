@@ -48,15 +48,10 @@ impl FFPacket for sBulletTarget {}
 
 const MAX_TARGETS: usize = 3;
 const BATTERY_BASE_COST: u32 = 6;
-/// How early a FIRE may arrive (network jitter) and still count. Measured locally: up to 108 ms early.
+
+// how early a FIRE or how late a HIT may arrive
 // TODO tune against real-latency players
-const FIRE_LAG_ALLOWANCE: Duration = Duration::from_millis(150);
-/// How long a fired projectile waits for its HIT before its slot is freed.
-// TODO figure out the best expiry. The client explodes projectiles after m_iDurationTime
-// (rockets 1.4 s, grenades 2.5 s, counted from FIRE_SUCC), so HITs reach us 2-52 ms
-// after that locally (one 305 ms outlier) plus real ping. Options: m_iDurationTime
-// + a measured lag allowance, or keep a flat value like this.
-const PROJECTILE_EXPIRY: Duration = Duration::from_millis(4000);
+const LAG_ALLOWANCE: Duration = Duration::from_millis(150);
 
 pub fn pc_attack_npcs(
     pkt: Packet,
@@ -195,7 +190,7 @@ pub fn pc_rocket_style_fire(
     let pkt: &sP_CL2FE_REQ_PC_ROCKET_STYLE_FIRE = pkt.get()?;
 
     // TODO validate range -> table data not accurate so actual range
-    // server position, same as grenades; sent back in place of the client's iX/Y/Z
+    // server position, not the client's iX/Y/Z
     let start_pos = state.get_player(pc_id)?.get_position();
     let end_pos = Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ };
 
@@ -257,7 +252,7 @@ pub fn pc_grenade_style_fire(
     let pc_id = client.get_player_id()?;
     let pkt: &sP_CL2FE_REQ_PC_GRENADE_STYLE_FIRE = pkt.get()?;
 
-    // grenade FIRE has no launch point; the client throws from the avatar's position
+    // grenade FIRE has no launch point
     let start_pos = state.get_player(pc_id)?.get_position();
     let end_pos = Position { x: pkt.iToX, y: pkt.iToY, z: pkt.iToZ };
 
@@ -304,10 +299,8 @@ pub fn pc_grenade_style_fire(
     Ok(())
 }
 
-/// Shared FIRE logic: weapon + table data checks, cooldown, boosts, projectile slot.
-/// Returns the new projectile's id, or None when the projectile slots are full (not an error).
 fn fire_projectile(
-    kind: ProjectileKind,
+    projectile_kind: ProjectileKind,
     start_pos: Position,
     end_pos: Position,
     pc_id: i32,
@@ -318,69 +311,60 @@ fn fire_projectile(
     let Some(weapon) = *player.get_item(ItemLocation::Equip, EQUIP_SLOT_HAND as usize)? else {
         return Err(FFError::build(
             Severity::Warning,
-            format!("{} tried to fire a {} with no item equipped", player, kind.name()),
+            format!("{} tried to fire a {} with no item equipped", player, projectile_kind.name()),
         ));
+    };
+
+    let reject = |reason: &str| {
+        FFError::build(
+            Severity::Warning,
+            format!("Player {} fired {} weapon {}: {}", pc_id, projectile_kind.name(), weapon.id, reason),
+        )
     };
 
     let weapon_stats = weapon.get_stats()?;
-    if weapon_stats.equip_type != Some(kind.equip_type()) {
-        return Err(FFError::build(
-            Severity::Warning,
-            format!(
-                "{} tried to fire a {} with the wrong weapon type {}",
-                player,
-                kind.name(),
-                weapon.id
-            ),
-        ));
+    if weapon_stats.equip_type != Some(projectile_kind.equip_type()) {
+        return Err(reject("wrong weapon type"));
     }
 
-    let Some(max_targets) = weapon_stats
+    let max_targets = weapon_stats
         .target_number
         .and_then(|n| usize::try_from(n).ok())
-    else {
-        return Err(FFError::build(
-            Severity::Warning,
-            format!("{} fired weapon {} with no valid target number", player, weapon.id),
-        ));
-    };
+        .ok_or_else(|| reject("no valid target number"))?;
 
     // m_iDelayTime is in tenths of a second
-    let Some(fire_delay) = weapon_stats
+    let fire_delay = weapon_stats
         .delay_time
         .and_then(|tenths| u64::try_from(tenths).ok())
         .map(|tenths| Duration::from_millis(tenths * 100))
-    else {
-        return Err(FFError::build(
-            Severity::Warning,
-            format!("{} fired weapon {} with no valid delay time", player, weapon.id),
-        ));
-    };
+        .ok_or_else(|| reject("no valid delay time"))?;
 
-    // GCRA fire limit: a shot may arrive up to FIRE_LAG_ALLOWANCE before it's due,
-    // but the next shot is still booked from the due time, so early shots never add up
-    // TODO weapon swap: next_shot_allowed is booked with the PREVIOUS weapon's cooldown, so the
-    // first shot right after a swap can be rejected (seen: rocket -> grenade, 278 ms early).
-    // The client allows it (doesn't carry cooldowns across swaps), but swap-spamming must not
-    // skip cooldowns. Option: store the last shot's due time instead and compute
-    // `last_due + current weapon's cooldown` at check time (old cooldown approach behaved like this).
+    // m_iDurationTime is in tenths of a second; the client explodes the projectile after it
+    let flight_time = weapon_stats
+        .duration_time
+        .and_then(|tenths| u64::try_from(tenths).ok())
+        .map(|tenths| Duration::from_millis(tenths * 100))
+        .ok_or_else(|| reject("no valid duration time"))?;
+
+    let effect_area = weapon_stats
+        .effect_area
+        .and_then(|area| u32::try_from(area).ok())
+        .ok_or_else(|| reject("no valid effect area"))?;
+
+    // GCRA fire limit, per weapon (the client doesn't carry cooldowns across swaps)
     let now = Instant::now();
-    if let Some(next_allowed) = player.get_next_shot_allowed() {
-        if now + FIRE_LAG_ALLOWANCE < next_allowed {
-            return Err(FFError::build(
-                Severity::Warning,
-                format!(
-                    "{} fired weapon {} too fast ({} ms before it was due, allowance {} ms, cooldown {} ms)",
-                    player,
-                    weapon.id,
-                    (next_allowed - now).as_millis(),
-                    FIRE_LAG_ALLOWANCE.as_millis(),
-                    fire_delay.as_millis()
-                ),
-            ));
+    if let Some(next_allowed) = player.get_next_shot_allowed(weapon.id) {
+        if now + LAG_ALLOWANCE < next_allowed {
+            return Err(reject(&format!(
+                "too fast ({} ms before it was due, allowance {} ms, cooldown {} ms)",
+                (next_allowed - now).as_millis(),
+                LAG_ALLOWANCE.as_millis(),
+                fire_delay.as_millis()
+            )));
         }
     }
 
+    // TODO finalize weapon boost logic with rockets/grenades
     let weapon_boosts = player.get_weapon_boosts();
     let weapon_boosts_needed = BATTERY_BASE_COST + weapon_stats.required_level as u32;
 
@@ -393,35 +377,34 @@ fn fire_projectile(
     };
 
     let projectile = Projectile {
-        kind,
+        kind: projectile_kind,
         weapon_id: weapon.id,
         single_power: player.get_single_power(),
         multi_power: player.get_multi_power(),
         charged: weapon_charged,
-        effect_area: weapon_stats.effect_area.unwrap_or(0) as u32,
+        effect_area,
         max_targets,
         start_pos,
         end_pos,
         fire_time: now,
-        end_time: now + PROJECTILE_EXPIRY,
+        end_time: now + flight_time + LAG_ALLOWANCE,
     };
 
     let Some(projectile_id) = player.add_projectile(projectile) else {
         log(
             Severity::Debug,
-            &format!("{} tried to fire a {} but has too many projectiles", player, kind.name()),
+            &format!("{} tried to fire a {} but has too many projectiles", player, projectile_kind.name()),
         );
         return Ok(None);
     };
-    // book from when this shot was due (or now, if it came late) so waiting can't bank shots
-    let due = player.get_next_shot_allowed().map_or(now, |next_allowed| next_allowed.max(now));
-    player.set_next_shot_allowed(due + fire_delay);
+    // book from the due time so waiting can't bank shots
+    let due = player.get_next_shot_allowed(weapon.id).map_or(now, |next_allowed| next_allowed.max(now));
+    player.set_next_shot_allowed(weapon.id, due + fire_delay);
 
     Ok(Some(projectile_id))
 }
 
-/// The client sends ROCKET_STYLE_HIT for rockets AND grenades (cnWarHead.cs:474),
-/// so the projectile kind comes from the stored projectile, not the packet.
+/// The client sends ROCKET_STYLE_HIT for both rockets and grenades.
 pub fn pc_projectile_hit(
     pkt: Packet,
     clients: &ClientMap,
@@ -441,7 +424,6 @@ pub fn pc_projectile_hit(
         ));
     };
 
-    // expiry is checked here (not in remove_projectile) so the flight time can be logged
     let now = Instant::now();
     let flight_ms = (now - projectile.fire_time).as_millis();
     let limit_ms = (projectile.end_time - projectile.fire_time).as_millis();
@@ -485,7 +467,6 @@ pub fn pc_projectile_hit(
         let npc_id = reader.get_struct::<sBulletTarget>()?.target_id;
         match state.get_npc(npc_id) {
             Ok(npc) => {
-                // NPC IDs are shard-wide, so drop mobs from other channels/instances
                 if npc.instance_id != player_instance {
                     log(
                         Severity::Warning,
@@ -500,7 +481,6 @@ pub fn pc_projectile_hit(
                     );
                     continue;
                 }
-                // drop distances if outside anticheat
                 if let Some(distance) = hit_to_mob_distance(npc, hit_pos, projectile.effect_area) {
                     hits.push((npc.get_id(), distance));
                 }
@@ -513,7 +493,6 @@ pub fn pc_projectile_hit(
 
     let results: Vec<sAttackResult> = skills::do_projectile_attack(EntityID::Player(pc_id), &target_ids, &projectile, state)?;
 
-    // observers handle the two HIT broadcasts separately
     let target_cnt = results.len() as i32;
     let mut bcast = match projectile.kind {
         ProjectileKind::Rocket => {

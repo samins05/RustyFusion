@@ -1185,6 +1185,7 @@ fn load_item_data(
                 equip_type: data.m_iEquipType,
                 target_number: data.m_iTargetNumber,
                 delay_time: data.m_iDelayTime,
+                duration_time: data.m_iDurationTime,
             };
             map.insert(key, data);
         }

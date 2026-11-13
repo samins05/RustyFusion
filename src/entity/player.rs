@@ -450,8 +450,8 @@ pub struct Projectile {
     pub charged: bool,
     pub effect_area: u32,
     pub max_targets: usize,
-    pub start_pos: Position,
-    pub end_pos: Position,
+    pub start_pos: Position, // TODO used for range validation
+    pub end_pos: Position,   // TODO used for range validation
     pub fire_time: Instant,
     pub end_time: Instant,
 }
@@ -502,7 +502,7 @@ pub struct Player {
     nano_potions: u32,
     weapon_boosts: u32,
     owned_projectiles: [Option<Projectile>; SIZEOF_PC_BULLET_SLOT as usize],
-    next_shot_allowed: Option<Instant>,
+    next_shot_allowed: HashMap<i16, Instant>, // per weapon id
     pub buddy_list_synced: bool,
     buddy_list: BuddyList,
     pub buddy_offered_to: Option<i64>,
@@ -1456,12 +1456,15 @@ impl Player {
         self.nano_potions
     }
 
-    pub fn get_next_shot_allowed(&self) -> Option<Instant> {
-        self.next_shot_allowed
+    pub fn get_next_shot_allowed(&self, weapon_id: i16) -> Option<Instant> {
+        self.next_shot_allowed.get(&weapon_id).copied()
     }
 
-    pub fn set_next_shot_allowed(&mut self, time: Instant) {
-        self.next_shot_allowed = Some(time);
+    pub fn set_next_shot_allowed(&mut self, weapon_id: i16, time: Instant) {
+        // passed entries mean no cooldown left, so dropping them keeps the map small
+        let now = Instant::now();
+        self.next_shot_allowed.retain(|_, next| *next > now);
+        self.next_shot_allowed.insert(weapon_id, time);
     }
 
     pub fn add_projectile(&mut self, projectile: Projectile) -> Option<i8> {
