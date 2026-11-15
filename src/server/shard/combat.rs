@@ -368,6 +368,36 @@ fn try_spawn_projectile(
 
     // rate limiting for weapon cooldown
     let now = Instant::now();
+    // testbed: [gcra] metrics line per FIRE, parsed by tools/gcra_metrics.py
+    {
+        let next_allowed = player.get_next_shot_allowed(weapon.id);
+        let offset = next_allowed.map_or("first".to_string(), |next| {
+            if now >= next {
+                (now - next).as_millis().to_string()
+            } else {
+                format!("-{}", (next - now).as_millis())
+            }
+        });
+        let verdict = if next_allowed.is_some_and(|next| now + FIRE_LAG_ALLOWANCE < next) {
+            "reject"
+        } else {
+            "accept"
+        };
+        log(
+            Severity::Info,
+            &format!(
+                "[gcra] pc={} kind={} weapon={} offset={} cooldown={} allowance={} hit_allowance={} verdict={}",
+                pc_id,
+                projectile_kind.name(),
+                weapon.id,
+                offset,
+                fire_delay.as_millis(),
+                FIRE_LAG_ALLOWANCE.as_millis(),
+                HIT_EXPIRY_ALLOWANCE.as_millis(),
+                verdict
+            ),
+        );
+    }
     if let Some(next_allowed) = player.get_next_shot_allowed(weapon.id) {
         if now + FIRE_LAG_ALLOWANCE < next_allowed {
             return Err(reject(&format!(
@@ -397,6 +427,7 @@ fn try_spawn_projectile(
         start_pos,
         end_pos,
         end_time: now + flight_time + HIT_EXPIRY_ALLOWANCE,
+        fire_time: now, // testbed
     };
 
     // silently drop if too many active bullets

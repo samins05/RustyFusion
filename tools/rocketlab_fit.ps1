@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Benchmarks rocket blast-range rules against what the game client actually hit (rocketlab.csv).
 
@@ -97,12 +97,16 @@ if (Test-Path $Config) {
 $csvRows = Import-Csv $Csv
 $weapons = @($csvRows | Select-Object -ExpandProperty weapon -Unique)
 $effectArea = @{}
+$kindOf = @{}   # weapon id -> Rocket / Grenade (from m_iEquipType)
 if (Test-Path $Xdt) {
     # (PowerShell names are case-insensitive: don't call this $xdt, it would clobber -Xdt)
     $tableRoot = Get-Content $Xdt -Raw | ConvertFrom-Json
     foreach ($it in $tableRoot.m_pWeaponItemTable.m_pItemData) {
         $id = [string]$it.m_iItemNumber
-        if ($weapons -contains $id) { $effectArea[$id] = [double]$it.m_iEffectArea }
+        if ($weapons -contains $id) {
+            $effectArea[$id] = [double]$it.m_iEffectArea
+            $kindOf[$id] = switch ([int]$it.m_iEquipType) { 11 { 'Rocket' } 5 { 'Grenade' } default { "Equip type $_" } }
+        }
     }
 }
 foreach ($w in $weapons) {
@@ -110,6 +114,7 @@ foreach ($w in $weapons) {
         Write-Host "  Weapon $w not found in $Xdt; assuming blast radius 200." -ForegroundColor Yellow
         $effectArea[$w] = 200.0
     }
+    if (-not $kindOf.ContainsKey($w)) { $kindOf[$w] = 'Unknown weapon' }
 }
 
 # ------------------------------------------------------------------ load data
@@ -130,11 +135,9 @@ $rows = $csvRows | ForEach-Object {
         cdist = [Math]::Sqrt($d2 * $d2 + $vz * $vz)     # client: distance to body center
         csize = [Math]::Max($rad, $hgt / 2)             # client: body size
         blast = $effectArea[$_.weapon]
+        weapon = $_.weapon; kind = $kindOf[$_.weapon]
     }
 }
-$idle = @($rows | Where-Object { $_.summoned -and -not $_.dead -and $_.drift -le $MovingThreshold })
-$moving = @($rows | Where-Object { $_.summoned -and -not $_.dead -and $_.drift -gt $MovingThreshold })
-$shots = @($rows | ForEach-Object { "$($_.ts.Substring(0, [Math]::Min(8, $_.ts.Length)))-$($_.shot)" } | Select-Object -Unique).Count
 
 # ------------------------------------------------------------------ rules
 # each rule: name, how, formula text, and a scriptblock returning { limit, distance } for a row
@@ -175,76 +178,87 @@ function Score($data, $r) {
     , @($fa, $nh, $fr, $nn)
 }
 
-# ------------------------------------------------------------------ header
-Write-Title "Rocket range check benchmark"
-Write-Host ("  {0} rocket hits, {1} mob checks  ({2} idle mobs, {3} moving mobs)" -f $shots, $rows.Count, $idle.Count, $moving.Count) -ForegroundColor Gray
-Write-Host ("  Weapons: " + (($weapons | ForEach-Object { "$_ (blast $($effectArea[$_]))" }) -join ', ')) -ForegroundColor Gray
-Write-Host "  Mobs the game client hit are treated as legit." -ForegroundColor Gray
-if (-not @($idle | Where-Object hit).Count -and -not @($moving | Where-Object hit).Count) {
-    Write-Host "  Not enough data yet: shoot some testbed mobs first." -ForegroundColor Yellow; return
-}
+# ------------------------------------------------------------------ report, one per weapon kind
+function Write-Report($kind, $rows) {
+    $idle = @($rows | Where-Object { $_.summoned -and -not $_.dead -and $_.drift -le $MovingThreshold })
+    $moving = @($rows | Where-Object { $_.summoned -and -not $_.dead -and $_.drift -gt $MovingThreshold })
+    $shots = @($rows | ForEach-Object { "$($_.ts.Substring(0, [Math]::Min(8, $_.ts.Length)))-$($_.shot)" } | Select-Object -Unique).Count
 
-Write-Host ""
-Write-Host " How to read this" -ForegroundColor White
-Write-Host "   Agrees with client   " -ForegroundColor Cyan -NoNewline; Write-Host "how often the rule gives the same hit/not-hit answer as the game (higher is better)" -ForegroundColor Gray
-Write-Host "   False alarms         " -ForegroundColor Cyan -NoNewline; Write-Host "real hits the rule would flag as cheating (want 0)" -ForegroundColor Gray
-Write-Host "   Free cheat room      " -ForegroundColor Cyan -NoNewline; Write-Host "mobs the game did NOT hit that the rule would still accept (want low)" -ForegroundColor Gray
-
-# ------------------------------------------------------------------ overall benchmark
-function Write-Overall($caption, $data) {
-    if (-not $data.Count) { return }
-    $cols = @((Col 'Rule' 12), (Col 'Measured' 12), (Col 'Allowed distance' 40), (Col 'Agrees with client' 18 'right'),
-              (Col 'False alarms' 16 'right'), (Col 'Free cheat room' 16 'right'))
-    $tbl = foreach ($r in $rules) {
-        $s = Score $data $r
-        $agree = Pct ($s[1] - $s[0] + $s[3] - $s[2]) ($s[1] + $s[3])
-        $agreeColor = if ($agree -ge 99) { 'Green' } elseif ($agree -ge 95) { 'Yellow' } else { 'Red' }
-        $faPct = Pct $s[0] $s[1]
-        $faColor = if ($s[0] -eq 0) { 'Green' } elseif ($faPct -le 2) { 'Yellow' } else { 'Red' }
-        $frPct = Pct $s[2] $s[3]
-        $frColor = if ($frPct -le 2) { 'Green' } elseif ($frPct -le 10) { 'Yellow' } else { 'Red' }
-        , @((Cell $r.name 'White'), (Cell $r.how 'Gray'), (Cell $r.text 'Gray'),
-            (Cell ("{0:N1}%" -f $agree) $agreeColor),
-            (Cell ("{0} of {1}" -f $s[0], $s[1]) $faColor),
-            (Cell ("{0} of {1}" -f $s[2], $s[3]) $frColor))
+    # ------------------------------------------------------------------ header
+    Write-Title "$kind range check benchmark"
+    Write-Host ("  {0} {4} hits, {1} mob checks  ({2} idle mobs, {3} moving mobs)" -f $shots, $rows.Count, $idle.Count, $moving.Count, $kind.ToLower()) -ForegroundColor Gray
+    Write-Host ("  Weapons: " + ((@($rows | Select-Object -ExpandProperty weapon -Unique) | ForEach-Object { "$_ (blast $($effectArea[$_]))" }) -join ', ')) -ForegroundColor Gray
+    Write-Host "  Mobs the game client hit are treated as legit." -ForegroundColor Gray
+    if (-not @($idle | Where-Object hit).Count -and -not @($moving | Where-Object hit).Count) {
+        Write-Host "  Not enough data yet: shoot some testbed mobs first." -ForegroundColor Yellow; return
     }
-    Write-Table $caption $cols $tbl
-}
-Write-Overall "Idle mobs (exact positions: tests the rule itself)" $idle
-Write-Overall "Moving mobs (client and server positions differ: tests the slack)" $moving
 
-# ------------------------------------------------------------------ per mob type (client rule)
-$client = $rules | Where-Object { $_.name -eq 'Client' }
-$pr8 = $rules | Where-Object { $_.name -eq 'PR #8' }
-$cols2 = @((Col 'Mob' 22), (Col 'r' 4 'right'), (Col 'h' 5 'right'), (Col 'Client limit' 12 'right'),
-           (Col 'Real hits' 9 'right'), (Col 'Closest call' 12 'right'), (Col 'Client false alarms' 19 'right'), (Col 'PR #8 false alarms' 18 'right'))
-$alive = @($idle) + @($moving)
-$tbl2 = foreach ($g in ($alive | Group-Object type | Sort-Object { $_.Group[0].csize })) {
-    $x0 = $g.Group[0]
-    $hits = @($g.Group | Where-Object hit)
-    if (-not $hits.Count) { continue }
-    $closest = ($hits | ForEach-Object { Margin $_ $client } | Measure-Object -Minimum).Minimum
-    $fa = @($hits | Where-Object { -not (Passes $_ $client) }).Count
-    $fa8 = @($hits | Where-Object { -not (Passes $_ $pr8) }).Count
-    $closeColor = if ($closest -lt 0) { 'Red' } elseif ($closest -lt 25) { 'Yellow' } else { 'Green' }
-    , @((Cell (MobName $g.Name)), (Cell $x0.r 'Gray'), (Cell $x0.h 'Gray'),
-        (Cell ("{0:N0}" -f ($x0.csize + $x0.blast)) 'Cyan'), (Cell $hits.Count 'Gray'),
-        (Cell ("{0:+0;-0}" -f $closest) $closeColor),
-        (Cell $fa $(if ($fa) { 'Red' } else { 'Green' })),
-        (Cell $fa8 $(if ($fa8) { 'Red' } else { 'Green' })))
-}
-Write-Table "Per mob type, idle + moving  (Closest call = smallest margin of any real hit under the client rule; negative = flagged)" $cols2 $tbl2
+    Write-Host ""
+    Write-Host " How to read this" -ForegroundColor White
+    Write-Host "   Agrees with client   " -ForegroundColor Cyan -NoNewline; Write-Host "how often the rule gives the same hit/not-hit answer as the game (higher is better)" -ForegroundColor Gray
+    Write-Host "   False alarms         " -ForegroundColor Cyan -NoNewline; Write-Host "real hits the rule would flag as cheating (want 0)" -ForegroundColor Gray
+    Write-Host "   Free cheat room      " -ForegroundColor Cyan -NoNewline; Write-Host "mobs the game did NOT hit that the rule would still accept (want low)" -ForegroundColor Gray
 
-# ------------------------------------------------------------------ slack recommendation
-$overs = @($moving + $idle | Where-Object hit | ForEach-Object { -(Margin $_ $client) } | Where-Object { $_ -gt 0 } | Sort-Object)
-Write-Host ""
-Write-Host " Slack (rocket_blast_slack, currently $slack)" -ForegroundColor White
-if (-not $overs.Count) {
-    Write-Host "   Every real hit is inside the client rule with no slack." -ForegroundColor Green
-} else {
-    Write-Host ("   Real hits beyond the client rule: {0}, by {1}" -f $overs.Count, (($overs | ForEach-Object { "{0:N0}" -f $_ }) -join ', ')) -ForegroundColor Gray
-    $covered = @($overs | Where-Object { $_ -lt $slack }).Count
-    $color = if ($covered -eq $overs.Count) { 'Green' } else { 'Yellow' }
-    Write-Host ("   Slack $slack covers {0} of {1}. The rest are movement lag; raise slack only if they keep showing up." -f $covered, $overs.Count) -ForegroundColor $color
+    # ------------------------------------------------------------------ overall benchmark
+    function Write-Overall($caption, $data) {
+        if (-not $data.Count) { return }
+        $cols = @((Col 'Rule' 12), (Col 'Measured' 12), (Col 'Allowed distance' 40), (Col 'Agrees with client' 18 'right'),
+                  (Col 'False alarms' 16 'right'), (Col 'Free cheat room' 16 'right'))
+        $tbl = foreach ($r in $rules) {
+            $s = Score $data $r
+            $agree = Pct ($s[1] - $s[0] + $s[3] - $s[2]) ($s[1] + $s[3])
+            $agreeColor = if ($agree -ge 99) { 'Green' } elseif ($agree -ge 95) { 'Yellow' } else { 'Red' }
+            $faPct = Pct $s[0] $s[1]
+            $faColor = if ($s[0] -eq 0) { 'Green' } elseif ($faPct -le 2) { 'Yellow' } else { 'Red' }
+            $frPct = Pct $s[2] $s[3]
+            $frColor = if ($frPct -le 2) { 'Green' } elseif ($frPct -le 10) { 'Yellow' } else { 'Red' }
+            , @((Cell $r.name 'White'), (Cell $r.how 'Gray'), (Cell $r.text 'Gray'),
+                (Cell ("{0:N1}%" -f $agree) $agreeColor),
+                (Cell ("{0} of {1}" -f $s[0], $s[1]) $faColor),
+                (Cell ("{0} of {1}" -f $s[2], $s[3]) $frColor))
+        }
+        Write-Table $caption $cols $tbl
+    }
+    Write-Overall "Idle mobs (exact positions: tests the rule itself)" $idle
+    Write-Overall "Moving mobs (client and server positions differ: tests the slack)" $moving
+
+    # ------------------------------------------------------------------ per mob type (client rule)
+    $client = $rules | Where-Object { $_.name -eq 'Client' }
+    $pr8 = $rules | Where-Object { $_.name -eq 'PR #8' }
+    $cols2 = @((Col 'Mob' 22), (Col 'r' 4 'right'), (Col 'h' 5 'right'), (Col 'Client limit' 12 'right'),
+               (Col 'Real hits' 9 'right'), (Col 'Closest call' 12 'right'), (Col 'Client false alarms' 19 'right'), (Col 'PR #8 false alarms' 18 'right'))
+    $alive = @($idle) + @($moving)
+    $tbl2 = foreach ($g in ($alive | Group-Object type | Sort-Object { $_.Group[0].csize })) {
+        $x0 = $g.Group[0]
+        $hits = @($g.Group | Where-Object hit)
+        if (-not $hits.Count) { continue }
+        $closest = ($hits | ForEach-Object { Margin $_ $client } | Measure-Object -Minimum).Minimum
+        $fa = @($hits | Where-Object { -not (Passes $_ $client) }).Count
+        $fa8 = @($hits | Where-Object { -not (Passes $_ $pr8) }).Count
+        $closeColor = if ($closest -lt 0) { 'Red' } elseif ($closest -lt 25) { 'Yellow' } else { 'Green' }
+        , @((Cell (MobName $g.Name)), (Cell $x0.r 'Gray'), (Cell $x0.h 'Gray'),
+            (Cell ("{0:N0}" -f ($x0.csize + $x0.blast)) 'Cyan'), (Cell $hits.Count 'Gray'),
+            (Cell ("{0:+0;-0}" -f $closest) $closeColor),
+            (Cell $fa $(if ($fa) { 'Red' } else { 'Green' })),
+            (Cell $fa8 $(if ($fa8) { 'Red' } else { 'Green' })))
+    }
+    Write-Table "Per mob type, idle + moving  (Closest call = smallest margin of any real hit under the client rule; negative = flagged)" $cols2 $tbl2
+
+    # ------------------------------------------------------------------ slack recommendation
+    $overs = @($moving + $idle | Where-Object hit | ForEach-Object { -(Margin $_ $client) } | Where-Object { $_ -gt 0 } | Sort-Object)
+    Write-Host ""
+    Write-Host " Slack (rocket_blast_slack, currently $slack)" -ForegroundColor White
+    if (-not $overs.Count) {
+        Write-Host "   Every real hit is inside the client rule with no slack." -ForegroundColor Green
+    } else {
+        Write-Host ("   Real hits beyond the client rule: {0}, by {1}" -f $overs.Count, (($overs | ForEach-Object { "{0:N0}" -f $_ }) -join ', ')) -ForegroundColor Gray
+        $covered = @($overs | Where-Object { $_ -lt $slack }).Count
+        $color = if ($covered -eq $overs.Count) { 'Green' } else { 'Yellow' }
+        Write-Host ("   Slack $slack covers {0} of {1}. The rest are movement lag; raise slack only if they keep showing up." -f $covered, $overs.Count) -ForegroundColor $color
+    }
+    Write-Host ""
 }
-Write-Host ""
+
+foreach ($group in ($rows | Group-Object kind | Sort-Object Name -Descending)) {
+    Write-Report $group.Name @($group.Group)
+}

@@ -455,6 +455,7 @@ pub struct Projectile {
     pub start_pos: Position, // TODO used for range validation
     pub end_pos: Position,   // TODO used for range validation
     pub end_time: Instant,
+    pub fire_time: Instant, // testbed: timing metrics
 }
 
 impl From<&Projectile> for sPCBullet {
@@ -1495,7 +1496,32 @@ impl Player {
     pub fn remove_projectile(&mut self, projectile_id: i8) -> Option<Projectile> {
         let slot = usize::try_from(projectile_id).ok()?;
         let projectile = self.owned_projectiles.get_mut(slot)?.take()?;
-        (Instant::now() < projectile.end_time).then_some(projectile)
+        let now = Instant::now();
+        // testbed: timing metrics, parsed by tools/gcra_metrics.py
+        let since_fire = (now - projectile.fire_time).as_millis();
+        let limit = (projectile.end_time - projectile.fire_time).as_millis();
+        if now >= projectile.end_time {
+            log(
+                Severity::Info,
+                &format!(
+                    "[projectile-timing] {} {} hit for expired projectile {} ({} ms after fire, limit {} ms)",
+                    self, projectile.kind.name(), projectile_id, since_fire, limit
+                ),
+            );
+            return None;
+        }
+        log(
+            Severity::Info,
+            &format!(
+                "[projectile-timing] {} {} projectile {} hit {} ms after fire, limit {} ms",
+                self,
+                projectile.kind.name(),
+                projectile_id,
+                since_fire,
+                limit
+            ),
+        );
+        Some(projectile)
     }
 
     pub fn set_pre_warp(&mut self) {
