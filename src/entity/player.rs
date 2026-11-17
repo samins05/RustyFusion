@@ -369,6 +369,13 @@ impl BuddyList {
         self.get_buddy_slot_number(pc_uid).is_some()
     }
 
+    fn has_blocked(&self, pc_uid: i64) -> bool {
+        self.slots
+            .iter()
+            .flatten()
+            .any(|entry| entry.pc_uid == pc_uid && entry.blocked)
+    }
+
     fn insert_buddy(&mut self, buddy: BuddyListEntry) -> FFResult<usize> {
         if self.is_buddies_with(buddy.pc_uid) {
             return Err(FFError::build(
@@ -1484,6 +1491,11 @@ impl Player {
 
     pub fn is_buddies_with(&self, pc_uid: i64) -> bool {
         self.buddy_list.is_buddies_with(pc_uid)
+    }
+
+    /// True only if `pc_uid` is on the list AND flagged blocked (unlike `is_buddies_with`).
+    pub fn has_blocked(&self, pc_uid: i64) -> bool {
+        self.buddy_list.has_blocked(pc_uid)
     }
 
     pub fn add_buddy(&mut self, buddy_info: BuddyListEntry) -> FFResult<usize> {

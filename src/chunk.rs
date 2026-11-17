@@ -191,7 +191,7 @@ impl EntityMap {
         self.registry.get(&id).and_then(|entry| entry.chunk)
     }
 
-    pub fn get_around_entity(&mut self, id: EntityID) -> HashSet<EntityID> {
+    pub fn get_around_entity(&self, id: EntityID) -> HashSet<EntityID> {
         let mut entities = HashSet::new();
         if let Some(coords) = self.registry.get(&id).and_then(|entry| entry.chunk) {
             for coords in Self::get_coords_around(coords, get_visibility_range()) {
@@ -442,6 +442,14 @@ impl EntityMap {
         ))?;
         entry.tick_mode = tick_mode;
         Ok(())
+    }
+
+    /// Read-only borrows of every player in visibility range of `id` (includes `id` itself if it's a player).
+    pub fn get_players_around(&self, id: EntityID) -> Vec<&Player> {
+        self.get_around_entity(id)
+            .into_iter()
+            .filter_map(|eid| self.get_entity::<Player>(eid))
+            .collect()
     }
 
     pub fn for_each_around(&mut self, id: EntityID, mut f: impl FnMut(&FFClient)) {

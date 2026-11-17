@@ -82,11 +82,15 @@ pub async fn send_freechat_message(
             );
         }
 
-        state
-            .entity_map
-            .for_each_around(EntityID::Player(pc_id), |client| {
+        let sender_uid = player.get_uid();
+        for recipient in state.entity_map.get_players_around(EntityID::Player(pc_id)) {
+            if recipient.has_blocked(sender_uid) {
+                continue;
+            }
+            if let Some(client) = recipient.get_client() {
                 client.send_packet(P_FE2CL_REP_SEND_FREECHAT_MESSAGE_SUCC, &resp);
-            });
+            }
+        }
         Ok(())
     })
     .await
@@ -144,11 +148,15 @@ pub fn send_menuchat_message(
             szFreeChat: pkt.szFreeChat,
             iEmoteCode: pkt.iEmoteCode,
         };
-        state
-            .entity_map
-            .for_each_around(EntityID::Player(pc_id), |client| {
+        let sender_uid = player.get_uid();
+        for recipient in state.entity_map.get_players_around(EntityID::Player(pc_id)) {
+            if recipient.has_blocked(sender_uid) {
+                continue;
+            }
+            if let Some(client) = recipient.get_client() {
                 client.send_packet(P_FE2CL_REP_SEND_MENUCHAT_MESSAGE_SUCC, &resp);
-            });
+            }
+        }
         Ok(())
     })()
     .catch_fail(|| {
@@ -469,11 +477,15 @@ pub fn pc_avatar_emotes_chat(
         iEmoteCode: pkt.iEmoteCode,
     };
 
-    state
-        .entity_map
-        .for_each_around(EntityID::Player(pc_id), |client| {
+    let sender_uid = state.get_player(pc_id)?.get_uid();
+    for recipient in state.entity_map.get_players_around(EntityID::Player(pc_id)) {
+        if recipient.has_blocked(sender_uid) {
+            continue;
+        }
+        if let Some(client) = recipient.get_client() {
             client.send_packet(P_FE2CL_REP_PC_AVATAR_EMOTES_CHAT, &resp);
-        });
+        }
+    }
 
     Ok(())
 }
