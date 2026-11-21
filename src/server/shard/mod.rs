@@ -220,6 +220,9 @@ pub fn handle_packet<'a>(
             }
             P_CL2FE_REQ_GET_BUDDY_STATE => buddy::get_buddy_state(&clients, state),
             P_CL2FE_REQ_PC_BUDDY_WARP => buddy::pc_buddy_warp(pkt, &clients, state),
+            P_CL2FE_REQ_SET_BUDDY_BLOCK => buddy::set_buddy_block(pkt, &clients, state),
+            P_CL2FE_REQ_SET_PC_BLOCK => buddy::set_pc_block(pkt, &clients, state),
+            P_CL2FE_REQ_REMOVE_BUDDY => buddy::remove_buddy(pkt, &clients, state),
             //
             P_CL2FE_REQ_PC_TRADE_OFFER => trade::trade_offer(pkt, &clients, state),
             P_CL2FE_REQ_PC_TRADE_OFFER_REFUSAL => trade::trade_offer_refusal(pkt, &clients, state),

@@ -509,3 +509,143 @@ pub fn pc_buddy_warp(
             .send_packet(P_FE2CL_REP_PC_BUDDY_WARP_FAIL, &response);
     })
 }
+
+/// Shared by SET_BUDDY_BLOCK and SET_PC_BLOCK. One-way: only the sender's
+/// list changes. Returns the slot the blocked entry lives in.
+fn block(
+    clients: &ClientMap, 
+    state: &mut ShardServerState, 
+    target_uid: i64
+) -> FFResult<usize> {
+    let pc_id = clients.get_sender().get_player_id()?;
+    let player = state.get_player_mut(pc_id)?;
+    // TODO validations
+    player.block_player(target_uid)
+}
+
+pub fn set_buddy_block(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let pkt: &sP_CL2FE_REQ_SET_BUDDY_BLOCK = pkt.get()?;
+    let buddy_uid = pkt.iBuddyPCUID;
+
+    (|| {
+        let slot = block(clients, state, buddy_uid)?;
+        let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_SUCC {
+            iBuddyPCUID: buddy_uid,
+            iBuddySlot: slot as i8,
+        };
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_SUCC, &resp);
+        Ok(())
+    })()
+    .catch_fail(|| {
+        let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_FAIL {
+            iBuddyPCUID: buddy_uid,
+            iErrorCode: unused!(), // client has no FAIL handler
+        };
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_FAIL, &resp);
+    })
+}
+
+pub fn set_pc_block(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let pkt: &sP_CL2FE_REQ_SET_PC_BLOCK = pkt.get()?;
+    let target_id = pkt.iBlock_ID;
+    let target_uid = pkt.iBlock_PCUID;
+
+    (|| {
+        // TODO cross-shard
+        let slot = block(clients, state, target_uid)?;
+        let resp = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
+            iBlock_ID: target_id,
+            iBlock_PCUID: target_uid,
+            iBuddySlot: slot as i8,
+        };
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_SET_PC_BLOCK_SUCC, &resp);
+        Ok(())
+    })()
+    .catch_fail(|| {
+        let resp = sP_FE2CL_REP_SET_PC_BLOCK_FAIL {
+            iBlock_ID: target_id,
+            iBlock_PCUID: target_uid,
+            iErrorCode: unused!(), // client has no FAIL handler
+        };
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_SET_PC_BLOCK_FAIL, &resp);
+    })
+}
+
+pub fn remove_buddy(
+    pkt: Packet,
+    clients: &ClientMap,
+    state: &mut ShardServerState,
+) -> FFResult<()> {
+    let pkt: &sP_CL2FE_REQ_REMOVE_BUDDY = pkt.get()?;
+    let target_uid = pkt.iBuddyPCUID;
+
+    let pc_id = clients.get_sender().get_player_id()?;
+    let pc_uid = state.get_player(pc_id)?.get_uid();
+
+    // REMOVE_BUDDY gets used by client to:
+    // 1) removing a friend
+    // 2) unignoring a friend 
+    // 3 unignoring a non-friend
+    // so try both directions independently; either one may miss.
+    // No REMOVE_BUDDY_FAIL is sent for now (client has no handler for it);
+    // a miss is only logged via the returned error.
+
+    // player -> target
+    let player_res = (|| {
+        let player = state.get_player_mut(pc_id)?;
+        // TODO validations
+        let slot = player.remove_buddy(target_uid)?;
+        let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
+            iBuddyPCUID: target_uid,
+            iBuddySlot: slot as i8,
+        };
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_REMOVE_BUDDY_SUCC, &resp);
+        Ok(())
+    })();
+
+    // target -> player
+    let Some(target_id) = PlayerSearchQuery::ByUID(target_uid).execute(state) else {
+        // TODO cross-shard / offline
+        return player_res;
+    };
+    let target = state.get_player_mut(target_id)?;
+    // TODO validations
+    // only remove a Buddies entry, so we never wipe the target's block of us
+    let target_res = if target.is_buddies_with(pc_uid) {
+        target.remove_buddy(pc_uid)
+    } else {
+        Err(FFError::build(
+            Severity::Debug,
+            format!("{} has no buddy entry for player {}", target, pc_uid),
+        ))
+    };
+
+    // no FAIL on a miss, see above
+    if let (Ok(slot), Some(target_client)) = (&target_res, target.get_client()) {
+        let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
+            iBuddyPCUID: pc_uid,
+            iBuddySlot: *slot as i8,
+        };
+        target_client.send_packet(P_FE2CL_REP_REMOVE_BUDDY_SUCC, &resp);
+    }
+
+    player_res.and(target_res.map(|_| ()))
+}
