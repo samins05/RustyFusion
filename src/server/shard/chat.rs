@@ -375,10 +375,7 @@ pub fn send_buddy_freechat_message(
             );
         }
 
-        // blocks are one-sided, so the sender may still list the recipient as a buddy
-        if let (Some(buddy_client), false) =
-            (buddy.get_client(), buddy.has_blocked(player.get_uid()))
-        {
+        if let Some(buddy_client) = buddy.get_client() {
             buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_FREECHAT_MESSAGE_SUCC, &response_pkt);
         }
 
@@ -468,10 +465,7 @@ pub fn send_buddy_menuchat_message(
             );
         }
 
-        // blocks are one-sided, so the sender may still list the recipient as a buddy
-        if let (Some(buddy_client), false) =
-            (buddy.get_client(), buddy.has_blocked(player.get_uid()))
-        {
+        if let Some(buddy_client) = buddy.get_client() {
             buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_MENUCHAT_MESSAGE_SUCC, &response_pkt);
         }
 

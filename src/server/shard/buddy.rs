@@ -510,20 +510,8 @@ pub fn pc_buddy_warp(
     })
 }
 
-/// Shared by SET_BUDDY_BLOCK and SET_PC_BLOCK. One-way: only the sender's
-/// list changes. Returns the slot the blocked entry lives in.
-fn block(
-    clients: &ClientMap, 
-    state: &mut ShardServerState, 
-    target_uid: i64
-) -> FFResult<usize> {
-    let pc_id = clients.get_sender().get_player_id()?;
-    let player = state.get_player_mut(pc_id)?;
-    // TODO validations
-    player.block_player(target_uid)
-}
-
-pub fn set_buddy_block(
+/// SET_BUDDY_BLOCK: player blocks a buddy; {buddy,player} buddyship is severed.
+pub fn ignore_buddy(
     pkt: Packet,
     clients: &ClientMap,
     state: &mut ShardServerState,
@@ -531,8 +519,12 @@ pub fn set_buddy_block(
     let pkt: &sP_CL2FE_REQ_SET_BUDDY_BLOCK = pkt.get()?;
     let buddy_uid = pkt.iBuddyPCUID;
 
+    let pc_id = clients.get_sender().get_player_id()?;
+    let pc_uid = state.get_player(pc_id)?.get_uid();
+
     (|| {
-        let slot = block(clients, state, buddy_uid)?;
+        // TODO validations
+        let slot = state.get_player_mut(pc_id)?.block_player(buddy_uid)?;
         let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_SUCC {
             iBuddyPCUID: buddy_uid,
             iBuddySlot: slot as i8,
@@ -550,10 +542,36 @@ pub fn set_buddy_block(
         clients
             .get_sender()
             .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_FAIL, &resp);
-    })
+    })?;
+
+    // remove sender from the target's list
+    let Some(buddy_id) = PlayerSearchQuery::ByUID(buddy_uid).execute(state) else {
+        // TODO cross-shard: removing a buddy on another shard leaves their entry for us
+        return Ok(());
+    };
+    let buddy = state.get_player_mut(buddy_id)?;
+    // TODO validations
+    // keep the target's own block of the sender
+    if buddy.has_blocked(pc_uid) {
+        return Ok(());
+    }
+    // nothing to sever
+    if !buddy.is_buddies_with(pc_uid) {
+        return Ok(());
+    }
+    let slot = buddy.remove_buddy(pc_uid)?;
+    if let Some(buddy_client) = buddy.get_client() {
+        let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
+            iBuddyPCUID: pc_uid,
+            iBuddySlot: slot as i8,
+        };
+        buddy_client.send_packet(P_FE2CL_REP_REMOVE_BUDDY_SUCC, &resp);
+    }
+    Ok(())
 }
 
-pub fn set_pc_block(
+/// SET_PC_BLOCK: player blocks a non-buddy; only the player's list changes.
+pub fn ignore_player(
     pkt: Packet,
     clients: &ClientMap,
     state: &mut ShardServerState,
@@ -562,9 +580,11 @@ pub fn set_pc_block(
     let target_id = pkt.iBlock_ID;
     let target_uid = pkt.iBlock_PCUID;
 
+    let pc_id = clients.get_sender().get_player_id()?;
+
     (|| {
-        // TODO cross-shard
-        let slot = block(clients, state, target_uid)?;
+        // TODO validations
+        let slot = state.get_player_mut(pc_id)?.block_player(target_uid)?;
         let resp = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
             iBlock_ID: target_id,
             iBlock_PCUID: target_uid,
@@ -587,7 +607,9 @@ pub fn set_pc_block(
     })
 }
 
-pub fn remove_buddy(
+/// REMOVE_BUDDY: player's entry for the target is erased (one-sided).
+/// Sent on unignore, and after SET_BUDDY_BLOCK when removing a buddy.
+pub fn player_remove_relationship(
     pkt: Packet,
     clients: &ClientMap,
     state: &mut ShardServerState,
@@ -596,18 +618,8 @@ pub fn remove_buddy(
     let target_uid = pkt.iBuddyPCUID;
 
     let pc_id = clients.get_sender().get_player_id()?;
-    let pc_uid = state.get_player(pc_id)?.get_uid();
 
-    // REMOVE_BUDDY gets used by client to:
-    // 1) removing a friend
-    // 2) unignoring a friend 
-    // 3 unignoring a non-friend
-    // so try both directions independently; either one may miss.
-    // No REMOVE_BUDDY_FAIL is sent for now (client has no handler for it);
-    // a miss is only logged via the returned error.
-
-    // player -> target
-    let player_res = (|| {
+    (|| {
         let player = state.get_player_mut(pc_id)?;
         // TODO validations
         let slot = player.remove_buddy(target_uid)?;
@@ -619,33 +631,14 @@ pub fn remove_buddy(
             .get_sender()
             .send_packet(P_FE2CL_REP_REMOVE_BUDDY_SUCC, &resp);
         Ok(())
-    })();
-
-    // target -> player
-    let Some(target_id) = PlayerSearchQuery::ByUID(target_uid).execute(state) else {
-        // TODO cross-shard / offline
-        return player_res;
-    };
-    let target = state.get_player_mut(target_id)?;
-    // TODO validations
-    // only remove a Buddies entry, so we never wipe the target's block of us
-    let target_res = if target.is_buddies_with(pc_uid) {
-        target.remove_buddy(pc_uid)
-    } else {
-        Err(FFError::build(
-            Severity::Debug,
-            format!("{} has no buddy entry for player {}", target, pc_uid),
-        ))
-    };
-
-    // no FAIL on a miss, see above
-    if let (Ok(slot), Some(target_client)) = (&target_res, target.get_client()) {
-        let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
-            iBuddyPCUID: pc_uid,
-            iBuddySlot: *slot as i8,
+    })()
+    .catch_fail(|| {
+        let resp = sP_FE2CL_REP_REMOVE_BUDDY_FAIL {
+            iBuddyPCUID: target_uid,
+            iErrorCode: unused!(),
         };
-        target_client.send_packet(P_FE2CL_REP_REMOVE_BUDDY_SUCC, &resp);
-    }
-
-    player_res.and(target_res.map(|_| ()))
+        clients
+            .get_sender()
+            .send_packet(P_FE2CL_REP_REMOVE_BUDDY_FAIL, &resp);
+    })
 }
