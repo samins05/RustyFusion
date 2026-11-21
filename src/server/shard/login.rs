@@ -354,7 +354,11 @@ pub fn login_buddy_freechat(
                 iEmoteCode: pkt.iEmoteCode,
             };
 
-            buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_FREECHAT_MESSAGE_SUCC, &response_pkt);
+            // still ack below so the sender sees their own message
+            if !buddy.has_blocked(pkt.iFromPCUID) {
+                buddy_client
+                    .send_packet(P_FE2CL_REP_SEND_BUDDY_FREECHAT_MESSAGE_SUCC, &response_pkt);
+            }
 
             if let Some(login_server) = clients.get_login_server() {
                 let succ_pkt = sP_FE2LS_REP_SEND_BUDDY_FREECHAT_SUCC {
@@ -411,7 +415,11 @@ pub fn login_buddy_menuchat(
                 iEmoteCode: pkt.iEmoteCode,
             };
 
-            buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_MENUCHAT_MESSAGE_SUCC, &response_pkt);
+            // still ack below so the sender sees their own message
+            if !buddy.has_blocked(pkt.iFromPCUID) {
+                buddy_client
+                    .send_packet(P_FE2CL_REP_SEND_BUDDY_MENUCHAT_MESSAGE_SUCC, &response_pkt);
+            }
 
             if let Some(login_server) = clients.get_login_server() {
                 let succ_pkt = sP_FE2LS_REP_SEND_BUDDY_MENUCHAT_SUCC {

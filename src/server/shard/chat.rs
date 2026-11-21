@@ -14,6 +14,30 @@ use crate::{
 
 const CUSTOM_COMMAND_PREFIX: char = '!';
 
+/// Like `for_each_around`, but skips players who have blocked `sender_uid`.
+fn send_around_unblocked<T: FFPacket>(
+    state: &mut ShardServerState,
+    pc_id: i32,
+    sender_uid: i64,
+    pkt_id: PacketID,
+    pkt: &T,
+) {
+    for eid in state.entity_map.get_around_entity(EntityID::Player(pc_id)) {
+        let EntityID::Player(recipient_id) = eid else {
+            continue;
+        };
+        let Ok(recipient) = state.get_player(recipient_id) else {
+            continue;
+        };
+        if recipient.has_blocked(sender_uid) {
+            continue;
+        }
+        if let Some(client) = recipient.get_client() {
+            client.send_packet(pkt_id, pkt);
+        }
+    }
+}
+
 pub async fn send_freechat_message(
     pkt: Packet,
     clients: &ClientMap<'_>,
@@ -56,6 +80,7 @@ pub async fn send_freechat_message(
             return Ok(());
         }
 
+        let sender_uid = player.get_uid();
         let resp = sP_FE2CL_REP_SEND_FREECHAT_MESSAGE_SUCC {
             iPC_ID: pc_id,
             szFreeChat: util::encode_utf16(&msg).unwrap(),
@@ -82,11 +107,13 @@ pub async fn send_freechat_message(
             );
         }
 
-        state
-            .entity_map
-            .for_each_around(EntityID::Player(pc_id), |client| {
-                client.send_packet(P_FE2CL_REP_SEND_FREECHAT_MESSAGE_SUCC, &resp);
-            });
+        send_around_unblocked(
+            state,
+            pc_id,
+            sender_uid,
+            P_FE2CL_REP_SEND_FREECHAT_MESSAGE_SUCC,
+            &resp,
+        );
         Ok(())
     })
     .await
@@ -112,6 +139,7 @@ pub fn send_menuchat_message(
         let client = clients.get_sender();
         let pc_id = client.get_player_id()?;
         let player = state.get_player(pc_id)?;
+        let sender_uid = player.get_uid();
 
         let msg = util::parse_utf16(&pkt.szFreeChat)?;
         if !helpers::validate_menuchat_message(&msg) {
@@ -144,11 +172,13 @@ pub fn send_menuchat_message(
             szFreeChat: pkt.szFreeChat,
             iEmoteCode: pkt.iEmoteCode,
         };
-        state
-            .entity_map
-            .for_each_around(EntityID::Player(pc_id), |client| {
-                client.send_packet(P_FE2CL_REP_SEND_MENUCHAT_MESSAGE_SUCC, &resp);
-            });
+        send_around_unblocked(
+            state,
+            pc_id,
+            sender_uid,
+            P_FE2CL_REP_SEND_MENUCHAT_MESSAGE_SUCC,
+            &resp,
+        );
         Ok(())
     })()
     .catch_fail(|| {
@@ -216,6 +246,11 @@ pub fn send_group_freechat_message(
     if let Some(group_id) = player.group_id {
         let group = state.groups.get(&group_id).unwrap();
         for eid in group.get_member_ids() {
+            if let EntityID::Player(member_id) = *eid {
+                if state.get_player(member_id)?.has_blocked(player.get_uid()) {
+                    continue;
+                }
+            }
             let entity = state.entity_map.get_entity_raw(*eid).unwrap();
             if let Some(client) = entity.get_client() {
                 client.send_packet(P_FE2CL_REP_SEND_ALL_GROUP_FREECHAT_MESSAGE_SUCC, &pkt);
@@ -270,6 +305,11 @@ pub fn send_group_menuchat_message(
     if let Some(group_id) = player.group_id {
         let group = state.groups.get(&group_id).unwrap();
         for eid in group.get_member_ids() {
+            if let EntityID::Player(member_id) = *eid {
+                if state.get_player(member_id)?.has_blocked(player.get_uid()) {
+                    continue;
+                }
+            }
             let entity = state.entity_map.get_entity_raw(*eid).unwrap();
             if let Some(client) = entity.get_client() {
                 client.send_packet(P_FE2CL_REP_SEND_ALL_GROUP_MENUCHAT_MESSAGE_SUCC, &pkt);
@@ -335,7 +375,10 @@ pub fn send_buddy_freechat_message(
             );
         }
 
-        if let Some(buddy_client) = buddy.get_client() {
+        // blocks are one-sided, so the sender may still list the recipient as a buddy
+        if let (Some(buddy_client), false) =
+            (buddy.get_client(), buddy.has_blocked(player.get_uid()))
+        {
             buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_FREECHAT_MESSAGE_SUCC, &response_pkt);
         }
 
@@ -425,7 +468,10 @@ pub fn send_buddy_menuchat_message(
             );
         }
 
-        if let Some(buddy_client) = buddy.get_client() {
+        // blocks are one-sided, so the sender may still list the recipient as a buddy
+        if let (Some(buddy_client), false) =
+            (buddy.get_client(), buddy.has_blocked(player.get_uid()))
+        {
             buddy_client.send_packet(P_FE2CL_REP_SEND_BUDDY_MENUCHAT_MESSAGE_SUCC, &response_pkt);
         }
 

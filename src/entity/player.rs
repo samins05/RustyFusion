@@ -1518,6 +1518,12 @@ impl Player {
             .is_some_and(|r| r.status == RelationshipStatus::Buddies)
     }
 
+    pub fn has_blocked(&self, pc_uid: i64) -> bool {
+        self.relationship_list
+            .get_by_pc_uid(pc_uid)
+            .is_some_and(|r| r.status == RelationshipStatus::Blocked)
+    }
+
     pub fn add_buddy(&mut self, pc_uid: i64) -> FFResult<usize> {
         self.relationship_list
             .add(pc_uid, RelationshipStatus::Buddies)
