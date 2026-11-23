@@ -519,46 +519,52 @@ pub fn ignore_buddy(
     let pkt: &sP_CL2FE_REQ_SET_BUDDY_BLOCK = pkt.get()?;
     let buddy_uid = pkt.iBuddyPCUID;
 
-    let pc_id = clients.get_sender().get_player_id()?;
-    let pc_uid = state.get_player(pc_id)?.get_uid();
+    let reject = |msg: String| -> FFResult<()> { Err(FFError::build(Severity::Warning, msg)) };
 
-    (|| {
-        // TODO validations
-        let slot = state.get_player_mut(pc_id)?.block_player(buddy_uid)?;
-        let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_SUCC {
-            iBuddyPCUID: buddy_uid,
-            iBuddySlot: slot as i8,
-        };
-        clients
-            .get_sender()
-            .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_SUCC, &resp);
-        Ok(())
-    })()
-    .catch_fail(|| {
-        let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_FAIL {
-            iBuddyPCUID: buddy_uid,
-            iErrorCode: unused!(), // client has no FAIL handler
-        };
-        clients
-            .get_sender()
-            .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_FAIL, &resp);
-    })?;
+    let pc_id = clients.get_sender().get_player_id()?;
+    let player = state.get_player(pc_id)?;
+    let pc_uid = player.get_uid();
+    if !player.is_buddies_with(buddy_uid) {
+        return reject(format!(
+            "Player {} tried to ignore {} as a buddy, but they aren't on their buddy list",
+            pc_uid, buddy_uid
+        ));
+    }
+
+    let buddy_id = PlayerSearchQuery::ByUID(buddy_uid).execute(state);
+    if let Some(buddy_id) = buddy_id {
+        let buddy = state.get_player(buddy_id)?;
+        // blocking severs friendship, so a buddy can't have blocked the sender
+        if buddy.has_blocked(pc_uid) {
+            return reject(format!(
+                "Player {} tried to ignore buddy {}, who has already blocked them (lists out of sync)",
+                pc_uid, buddy_uid
+            ));
+        }
+        if !buddy.is_buddies_with(pc_uid) {
+            return reject(format!(
+                "Player {} tried to ignore buddy {}, who doesn't list them as a buddy (lists out of sync)",
+                pc_uid, buddy_uid
+            ));
+        }
+    }
+
+    // no FAIL packet: client has no SET_BUDDY_BLOCK_FAIL handler
+    let slot = state.get_player_mut(pc_id)?.block_player(buddy_uid)?;
+    let resp = sP_FE2CL_REP_SET_BUDDY_BLOCK_SUCC {
+        iBuddyPCUID: buddy_uid,
+        iBuddySlot: slot as i8,
+    };
+    clients
+        .get_sender()
+        .send_packet(P_FE2CL_REP_SET_BUDDY_BLOCK_SUCC, &resp);
 
     // remove sender from the target's list
-    let Some(buddy_id) = PlayerSearchQuery::ByUID(buddy_uid).execute(state) else {
-        // TODO cross-shard: removing a buddy on another shard leaves their entry for us
+    let Some(buddy_id) = buddy_id else {
+        // TODO cross-shard / offline
         return Ok(());
     };
     let buddy = state.get_player_mut(buddy_id)?;
-    // TODO validations
-    // keep the target's own block of the sender
-    if buddy.has_blocked(pc_uid) {
-        return Ok(());
-    }
-    // nothing to sever
-    if !buddy.is_buddies_with(pc_uid) {
-        return Ok(());
-    }
     let slot = buddy.remove_buddy(pc_uid)?;
     if let Some(buddy_client) = buddy.get_client() {
         let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
@@ -580,31 +586,47 @@ pub fn ignore_player(
     let target_id = pkt.iBlock_ID;
     let target_uid = pkt.iBlock_PCUID;
 
-    let pc_id = clients.get_sender().get_player_id()?;
+    let reject = |msg: String| -> FFResult<()> { Err(FFError::build(Severity::Warning, msg)) };
 
-    (|| {
-        // TODO validations
-        let slot = state.get_player_mut(pc_id)?.block_player(target_uid)?;
-        let resp = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
-            iBlock_ID: target_id,
-            iBlock_PCUID: target_uid,
-            iBuddySlot: slot as i8,
-        };
-        clients
-            .get_sender()
-            .send_packet(P_FE2CL_REP_SET_PC_BLOCK_SUCC, &resp);
-        Ok(())
-    })()
-    .catch_fail(|| {
-        let resp = sP_FE2CL_REP_SET_PC_BLOCK_FAIL {
-            iBlock_ID: target_id,
-            iBlock_PCUID: target_uid,
-            iErrorCode: unused!(), // client has no FAIL handler
-        };
-        clients
-            .get_sender()
-            .send_packet(P_FE2CL_REP_SET_PC_BLOCK_FAIL, &resp);
-    })
+    let pc_id = clients.get_sender().get_player_id()?;
+    let player = state.get_player(pc_id)?;
+    let pc_uid = player.get_uid();
+    
+    if player.is_buddies_with(target_uid) {
+        return reject(format!(
+            "Player {} tried to ignore buddy {} as a non-buddy (SET_PC_BLOCK)",
+            pc_uid, target_uid
+        ));
+    }
+
+    // client only sends this for a player it can see, so the target must be on this shard
+    match PlayerSearchQuery::ByUID(target_uid).execute(state) {
+        None => {
+            return reject(format!(
+                "Player {} tried to ignore player {}, who isn't on this shard",
+                pc_uid, target_uid
+            ));
+        }
+        Some(found_id) if found_id != target_id => {
+            return reject(format!(
+                "Player {} tried to ignore player {}, but sent shard ID {} (actual shard ID {})",
+                pc_uid, target_uid, target_id, found_id
+            ));
+        }
+        Some(_) => {}
+    }
+
+    // no FAIL packet: client has no SET_PC_BLOCK_FAIL handler
+    let slot = state.get_player_mut(pc_id)?.block_player(target_uid)?;
+    let resp = sP_FE2CL_REP_SET_PC_BLOCK_SUCC {
+        iBlock_ID: target_id,
+        iBlock_PCUID: target_uid,
+        iBuddySlot: slot as i8,
+    };
+    clients
+        .get_sender()
+        .send_packet(P_FE2CL_REP_SET_PC_BLOCK_SUCC, &resp);
+    Ok(())
 }
 
 /// REMOVE_BUDDY: player's entry for the target is erased (one-sided).
@@ -621,7 +643,7 @@ pub fn player_remove_relationship(
 
     (|| {
         let player = state.get_player_mut(pc_id)?;
-        // TODO validations
+        // errors if no relationship exists
         let slot = player.remove_buddy(target_uid)?;
         let resp = sP_FE2CL_REP_REMOVE_BUDDY_SUCC {
             iBuddyPCUID: target_uid,
